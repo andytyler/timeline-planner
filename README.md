@@ -1,6 +1,6 @@
 # Event Timeline Planner
 
-A standalone SvelteKit app for planning event run-of-show timelines with Supabase workspaces, Luma event sync, and Railway deployment.
+A standalone SvelteKit app for planning event run-of-show timelines with Supabase Auth, Supabase workspaces, email invitations, optional Luma event sync, and Railway deployment.
 
 ## Stack
 
@@ -14,36 +14,48 @@ A standalone SvelteKit app for planning event run-of-show timelines with Supabas
 
 ## Project Shape
 
-- Reusable UI comes from shadcn-svelte source components in `src/lib/components/ui`
 - The app root redirects to `/planner`
 - The planner app lives at `/planner`
-- Planner persistence uses `supabase/migrations/0001_timeline_workspace_schema.sql`
-- Railway config-as-code lives in `railway.toml`
+- Supabase schema and RLS live in `supabase/migrations/0001_timeline_workspace_schema.sql`
 - Runtime healthcheck endpoint: `/health`
-- Luma console integration notes live in `docs/shared-luma-console-integration.md`
-- Legacy landing-page files still exist in this directory but are no longer the deployed surface for this service; they should move to a separate static site/repo/service.
+- Railway config-as-code lives in `railway.toml`
+- Local mode is available when Supabase env vars are absent; it is a browser-only prototype mode
 
 ## Environment
 
 ```sh
-LUMA_API_KEY=
-LUMA_CONSOLE_DATABASE_URL=
-PLANNER_REQUIRE_SHARED_WORKSPACE=
 PUBLIC_SUPABASE_URL=
 PUBLIC_SUPABASE_PUBLISHABLE_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
 ```
 
-Keep real keys in `.env.local` or the Railway service environment, not in committed files.
-
-- `PUBLIC_SUPABASE_URL` and `PUBLIC_SUPABASE_PUBLISHABLE_KEY` enable Supabase Auth and planner persistence.
-- For one shared login with Luma console, set these Supabase public env vars to the same values as the Luma console service.
-- Workspace creation and invitation acceptance run through signed-in Supabase RPCs, so the normal web service does not need a service-role key.
-- `LUMA_API_KEY` powers `/planner` Luma sync.
-- `LUMA_CONSOLE_DATABASE_URL` points at the Luma console Postgres database for the shared workspace/event integration path.
-- `PLANNER_REQUIRE_SHARED_WORKSPACE=true` makes `/planner` refuse to run unless shared Supabase Auth and `LUMA_CONSOLE_DATABASE_URL` are configured. Use this in Railway production once the shared workspace path is the intended authority.
+- `PUBLIC_SUPABASE_URL` and `PUBLIC_SUPABASE_PUBLISHABLE_KEY` enable login, workspaces, members, invitations, and timeline persistence.
+- `SUPABASE_SERVICE_ROLE_KEY` is server-only. It lets the SvelteKit server read private workspace Luma credentials during sync.
+- Luma API keys are entered per workspace in the app and stored in `app_private.workspace_luma_credentials`; they are never returned to browser page data.
+- Keep real keys in `.env.local` or the Railway service environment, not in committed files.
 - Supabase Google OAuth must allow the production callback URL: `https://<railway-domain>/auth/callback`.
-- `/health` returns non-secret readiness flags for `supabaseAuthConfigured`, `sharedLumaConsoleConfigured`, and `lumaApiConfigured`, plus the active runtime mode: `local`, `supabase-fallback`, or `luma-console`.
-- `/health?deep=1` also checks whether the shared Luma console database is reachable and has the timeline tables/function installed. Keep Railway's normal liveness check on `/health` so routine health checks do not open database connections.
+
+## Fresh Supabase Setup
+
+1. Create a new Supabase project.
+2. In Supabase SQL Editor, run `supabase/migrations/0001_timeline_workspace_schema.sql`.
+3. In Supabase Auth, enable Google OAuth.
+4. Add local and production callback URLs:
+   - `http://localhost:5174/auth/callback`
+   - `https://<railway-domain>/auth/callback`
+5. Set `PUBLIC_SUPABASE_URL` and `PUBLIC_SUPABASE_PUBLISHABLE_KEY` locally and in Railway.
+
+The migration creates:
+
+- `profiles`: Auth-backed user identity for roster display.
+- `workspaces`: planning workspaces owned by signed-in users.
+- `workspace_members`: owner/admin/member/viewer access.
+- `workspace_invitations`: pending email invites that can be accepted by a signed-in account with the same email.
+- `timelines`, `timeline_lanes`, and `timeline_blocks`: persisted run-of-show data.
+- Optional `luma_events` rows for workspace-scoped Luma event sync.
+- `app_private.workspace_luma_credentials`: server-only per-workspace Luma API keys.
+
+Workspace creation, invitation creation, invitation acceptance, member updates, member removal, timeline creation, timeline duplication, timeline saving, and Luma sync all go through signed-in Supabase RPCs with RLS and database-side permission checks.
 
 ## Commands
 
@@ -54,44 +66,32 @@ bun run check
 bun run lint
 bun run build
 bun run start
-LUMA_CONSOLE_DATABASE_URL="postgres://..." bun run luma-console:schema
-PUBLIC_SUPABASE_URL="https://..." PUBLIC_SUPABASE_PUBLISHABLE_KEY="..." LUMA_CONSOLE_DATABASE_URL="postgres://..." PLANNER_REQUIRE_SHARED_WORKSPACE=true bun run luma-console:verify
 ```
-
-`luma-console:schema` applies `integrations/luma-console/timeline-schema.sql` to the Luma console Postgres database. Use it only when deploying the shared-workspace architecture.
-
-`luma-console:verify` checks the shared deployment contract before/after Railway configuration: shared Supabase Auth env vars, `LUMA_CONSOLE_DATABASE_URL`, `PLANNER_REQUIRE_SHARED_WORKSPACE`, Luma console base tables, planner timeline tables, and `create_event_timeline_with_default_lanes`.
 
 ## Railway
 
-Create a Railway service rooted at this `spring-summer-26` directory. The checked-in `railway.toml` sets:
+Create a Railway service rooted at this directory. The checked-in `railway.toml` sets:
 
 - build: `bun install --frozen-lockfile && bun run build`
 - start: `bun run start`
 - healthcheck: `/health`
 
-Set the environment variables above in the same Railway project/environment as the Luma console service.
+Set `PUBLIC_SUPABASE_URL`, `PUBLIC_SUPABASE_PUBLISHABLE_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` in Railway. The service-role key must stay private and server-side only.
 
-For the production shared-workspace deployment, set `PLANNER_REQUIRE_SHARED_WORKSPACE=true`. With that flag enabled, `/planner` returns a 503 instead of falling back to local sample mode or the standalone fallback schema when the shared login/database env vars are missing. `/health` remains a 200 liveness endpoint, but reports `readiness.sharedWorkspaceReady: false` and a `readiness.configError` string until configuration is complete.
-
-For full workspace reuse, do not assume the planner fallback schema is the production authority. The local Luma console repo uses `users`, `workspaces`, `workspace_memberships`, `luma_calendars`, and `events` in its `DATABASE_URL` database. See `docs/shared-luma-console-integration.md` before deploying this against shared production workspaces.
-
-After deploy, open `/health` on the Railway domain. The production shared-workspace target should report:
+After deploy, open `/health` on the Railway domain. A production Supabase-backed service should report:
 
 ```json
 {
-	"mode": "luma-console",
+	"mode": "supabase",
 	"readiness": {
 		"supabaseAuthConfigured": true,
-		"sharedLumaConsoleConfigured": true
+		"supabaseWorkspaceConfigured": true
 	}
 }
 ```
 
-After applying the shared timeline schema, open `/health?deep=1`. The production shared-workspace target should additionally report `readiness.lumaConsoleSchema.ready: true`.
+## Invitation Flow
 
-Before calling the Railway service ready, run `bun run luma-console:verify` with the same env vars configured on Railway. A passing verifier plus `/health?deep=1` returning `ready: true` are the deployment evidence for the shared workspace/database path.
+Owners/admins invite by email from the workspace panel. The database stores the pending invite. When the invited person signs in with the same email address, `/planner` shows the pending invitation and lets them accept it.
 
-## Notes
-
-The project was created with the current `sv` and `shadcn-svelte@latest` CLI flow, then componentized as source files under `src/lib/components/ui`.
+There is no email-sending provider wired yet; invite delivery is currently out-of-band.

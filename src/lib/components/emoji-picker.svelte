@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte';
+	import type { Attachment } from 'svelte/attachments';
 
 	type EmojiSelection = {
 		native?: string;
@@ -14,46 +14,47 @@
 
 	let { onSelect }: Props = $props();
 
-	let container: HTMLDivElement | undefined;
-	let picker: HTMLElement | null = null;
-	let destroyed = false;
+	const mountEmojiPicker: Attachment<HTMLDivElement> = (container) => {
+		let picker: HTMLElement | null = null;
+		let mounted = true;
 
-	onMount(async () => {
-		const [{ default: data }, { Picker }] = await Promise.all([
-			import('@emoji-mart/data'),
-			import('emoji-mart')
-		]);
+		void (async () => {
+			const [{ default: data }, { Picker }] = await Promise.all([
+				import('@emoji-mart/data'),
+				import('emoji-mart')
+			]);
 
-		if (destroyed || !container) return;
+			if (!mounted) return;
 
-		picker = new Picker({
-			data,
-			emojiButtonRadius: '6px',
-			emojiButtonSize: 34,
-			emojiSize: 21,
-			maxFrequentRows: 2,
-			navPosition: 'bottom',
-			perLine: 8,
-			previewPosition: 'none',
-			searchPosition: 'sticky',
-			set: 'native',
-			theme: 'light',
-			onEmojiSelect: (emoji: EmojiSelection) => {
-				if (emoji.native) onSelect(emoji.native);
-			}
-		}) as unknown as HTMLElement;
+			picker = new Picker({
+				data,
+				emojiButtonRadius: '6px',
+				emojiButtonSize: 34,
+				emojiSize: 21,
+				maxFrequentRows: 2,
+				navPosition: 'bottom',
+				perLine: 8,
+				previewPosition: 'none',
+				searchPosition: 'sticky',
+				set: 'native',
+				theme: 'light',
+				onEmojiSelect: (emoji: EmojiSelection) => {
+					if (emoji.native) onSelect(emoji.native);
+				}
+			}) as unknown as HTMLElement;
 
-		container.replaceChildren(picker);
-	});
+			container.replaceChildren(picker);
+		})();
 
-	onDestroy(() => {
-		destroyed = true;
-		picker?.remove();
-		picker = null;
-	});
+		return () => {
+			mounted = false;
+			picker?.remove();
+			picker = null;
+		};
+	};
 </script>
 
 <div
-	bind:this={container}
+	{@attach mountEmojiPicker}
 	class="max-h-[360px] w-[310px] overflow-hidden rounded-md bg-white text-neutral-950 [&_em-emoji-picker]:h-[360px] [&_em-emoji-picker]:w-full"
 ></div>

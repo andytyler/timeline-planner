@@ -19,7 +19,17 @@ create table public.workspaces (
   name text not null,
   slug text not null unique,
   luma_calendar_api_id text,
+  luma_api_key_updated_at timestamptz,
   created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table app_private.workspace_luma_credentials (
+  workspace_id uuid primary key references public.workspaces(id) on delete cascade,
+  api_key text not null check (length(trim(api_key)) >= 8),
+  created_by uuid references auth.users(id) on delete set null,
+  updated_by uuid references auth.users(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -165,6 +175,10 @@ $$;
 
 create trigger workspaces_touch_updated_at
 before update on public.workspaces
+for each row execute function public.touch_updated_at();
+
+create trigger workspace_luma_credentials_touch_updated_at
+before update on app_private.workspace_luma_credentials
 for each row execute function public.touch_updated_at();
 
 create trigger profiles_touch_updated_at
@@ -401,7 +415,8 @@ $$;
 
 create or replace function public.update_workspace_luma_source(
   target_workspace_id uuid,
-  calendar_api_id text
+  calendar_api_id text,
+  luma_api_key text default null
 )
 returns void
 language plpgsql
@@ -409,27 +424,81 @@ security definer
 set search_path = public, pg_temp
 as $$
 declare
+  current_user_id uuid := auth.uid();
   safe_calendar_api_id text := nullif(trim(calendar_api_id), '');
+  safe_luma_api_key text := nullif(trim(luma_api_key), '');
 begin
-  if auth.uid() is null then
+  if current_user_id is null then
     raise exception 'Sign in before updating workspace settings.'
       using errcode = '42501';
   end if;
 
-  if not app_private.can_manage_workspace(target_workspace_id) then
-    raise exception 'Only workspace owners and admins can update Luma settings.'
+  if not app_private.is_workspace_member(target_workspace_id) then
+    raise exception 'Only workspace members can update Luma settings.'
       using errcode = '42501';
   end if;
 
   update public.workspaces
-  set luma_calendar_api_id = safe_calendar_api_id
+  set
+    luma_calendar_api_id = safe_calendar_api_id,
+    luma_api_key_updated_at = case
+      when safe_luma_api_key is not null then now()
+      else luma_api_key_updated_at
+    end
   where id = target_workspace_id;
 
   if not found then
     raise exception 'Workspace not found.'
       using errcode = 'P0002';
   end if;
+
+  if safe_luma_api_key is not null then
+    insert into app_private.workspace_luma_credentials (
+      workspace_id,
+      api_key,
+      created_by,
+      updated_by
+    )
+    values (
+      target_workspace_id,
+      safe_luma_api_key,
+      current_user_id,
+      current_user_id
+    )
+    on conflict (workspace_id) do update
+    set
+      api_key = excluded.api_key,
+      updated_by = current_user_id;
+  end if;
 end;
+$$;
+
+create or replace function public.workspace_luma_api_key_configured(target_workspace_id uuid)
+returns boolean
+language sql
+stable
+security invoker
+set search_path = public, pg_temp
+as $$
+  select exists (
+    select 1
+    from public.workspaces
+    where id = target_workspace_id
+      and luma_api_key_updated_at is not null
+      and app_private.is_workspace_member(id)
+  );
+$$;
+
+create or replace function public.workspace_luma_api_key_for_server(target_workspace_id uuid)
+returns text
+language sql
+stable
+security invoker
+set search_path = public, pg_temp
+as $$
+  select api_key
+  from app_private.workspace_luma_credentials
+  where workspace_id = target_workspace_id;
 $$;
 
 create or replace function public.sync_workspace_luma_events(
@@ -452,8 +521,8 @@ begin
       using errcode = '42501';
   end if;
 
-  if not app_private.can_manage_workspace(target_workspace_id) then
-    raise exception 'Only workspace owners and admins can sync Luma events.'
+  if not app_private.is_workspace_member(target_workspace_id) then
+    raise exception 'Only workspace members can sync Luma events.'
       using errcode = '42501';
   end if;
 
@@ -809,8 +878,13 @@ revoke execute on function public.create_workspace(text) from public;
 revoke execute on function public.create_workspace(text) from anon;
 revoke execute on function public.accept_workspace_invitation(uuid) from public;
 revoke execute on function public.accept_workspace_invitation(uuid) from anon;
-revoke execute on function public.update_workspace_luma_source(uuid, text) from public;
-revoke execute on function public.update_workspace_luma_source(uuid, text) from anon;
+revoke execute on function public.update_workspace_luma_source(uuid, text, text) from public;
+revoke execute on function public.update_workspace_luma_source(uuid, text, text) from anon;
+revoke execute on function public.workspace_luma_api_key_configured(uuid) from public;
+revoke execute on function public.workspace_luma_api_key_configured(uuid) from anon;
+revoke execute on function public.workspace_luma_api_key_for_server(uuid) from public;
+revoke execute on function public.workspace_luma_api_key_for_server(uuid) from anon;
+revoke execute on function public.workspace_luma_api_key_for_server(uuid) from authenticated;
 revoke execute on function public.sync_workspace_luma_events(uuid, text, jsonb) from public;
 revoke execute on function public.sync_workspace_luma_events(uuid, text, jsonb) from anon;
 revoke execute on function public.revoke_workspace_invitation(uuid) from public;
@@ -1337,7 +1411,8 @@ grant execute on function app_private.can_manage_workspace(uuid) to authenticate
 grant execute on function app_private.can_edit_workspace(uuid) to authenticated;
 grant execute on function public.create_workspace(text) to authenticated;
 grant execute on function public.accept_workspace_invitation(uuid) to authenticated;
-grant execute on function public.update_workspace_luma_source(uuid, text) to authenticated;
+grant execute on function public.update_workspace_luma_source(uuid, text, text) to authenticated;
+grant execute on function public.workspace_luma_api_key_configured(uuid) to authenticated;
 grant execute on function public.sync_workspace_luma_events(uuid, text, jsonb) to authenticated;
 grant execute on function public.revoke_workspace_invitation(uuid) to authenticated;
 grant execute on function public.invite_workspace_member(uuid, text, text) to authenticated;
@@ -1346,3 +1421,6 @@ grant execute on function public.remove_workspace_member(uuid, uuid) to authenti
 grant execute on function public.create_timeline_with_default_lanes(uuid, text, uuid) to authenticated;
 grant execute on function public.save_timeline_snapshot(uuid, jsonb) to authenticated;
 grant execute on function public.duplicate_timeline(uuid, uuid) to authenticated;
+grant usage on schema app_private to service_role;
+grant select on table app_private.workspace_luma_credentials to service_role;
+grant execute on function public.workspace_luma_api_key_for_server(uuid) to service_role;

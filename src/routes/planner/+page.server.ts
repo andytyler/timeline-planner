@@ -1,26 +1,13 @@
 import { safeRedirectPath } from '$lib/server/redirect';
-import { sharedWorkspaceConfigError } from '$lib/server/runtime-config';
 import { fetchUpcomingLumaEvents } from '$lib/server/luma';
-import {
-	createLumaConsoleTimelineFromEvent,
-	saveLumaConsoleTimelineSnapshot,
-	lumaConsoleDatabaseConfigured,
-	lumaConsoleEventsForWorkspace,
-	lumaConsoleTimelineBlocks,
-	lumaConsoleTimelineLanes,
-	lumaConsoleTimelinesForWorkspace,
-	lumaConsoleUserForSupabaseUser,
-	lumaConsoleWorkspacesForSupabaseUser,
-	type LumaConsoleTimeline,
-	type LumaConsoleWorkspaceRole
-} from '$lib/server/luma-console-db';
+import { createSupabaseAdminClient } from '$lib/server/supabase-admin';
 import {
 	type TimelineBlock,
 	type TimelineBlockType,
 	type TimelineSnapshot,
 	type TimelineVisibility
 } from '$lib/timeline';
-import { error, fail, redirect } from '@sveltejs/kit';
+import { fail, redirect } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
 
 type WorkspaceRecord = {
@@ -228,29 +215,8 @@ async function workspaceRole(
 	return data.role as WorkspaceRole;
 }
 
-function canManageWorkspace(role: WorkspaceRole | null) {
-	return role === 'owner' || role === 'admin';
-}
-
 function canEditWorkspace(role: WorkspaceRole | null) {
 	return role === 'owner' || role === 'admin' || role === 'member';
-}
-
-function plannerRoleFromLumaConsole(role: LumaConsoleWorkspaceRole): WorkspaceRole {
-	if (role === 'reviewer') return 'viewer';
-	return role;
-}
-
-function timelineRecordFromLumaConsole(timeline: LumaConsoleTimeline): TimelineRecord {
-	return {
-		id: timeline.id,
-		title: timeline.title,
-		luma_event_id: timeline.event_id,
-		view_start: timeline.view_start,
-		view_end: timeline.view_end,
-		pad_before_minutes: timeline.pad_before_minutes,
-		pad_after_minutes: timeline.pad_after_minutes
-	};
 }
 
 function inviteRole(value: FormDataEntryValue | null): Exclude<WorkspaceRole, 'owner'> {
@@ -266,11 +232,6 @@ function managedMemberRole(
 }
 
 export const load: PageServerLoad = async ({ locals, url }) => {
-	const configError = sharedWorkspaceConfigError();
-	if (configError) {
-		error(503, configError);
-	}
-
 	const { user } = await locals.safeGetSession();
 
 	if (locals.supabase && !user) {
@@ -291,114 +252,10 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 			currentUserId: null as string | null,
 			activeWorkspaceRole: null as WorkspaceRole | null,
 			activeWorkspaceLumaCalendarApiId: null as string | null,
+			activeWorkspaceLumaApiKeyConfigured: false,
 			activeWorkspaceId: null as string | null,
 			activeTimeline: null as TimelineSnapshot | null
 		};
-	}
-
-	if (lumaConsoleDatabaseConfigured()) {
-		try {
-			const [lumaConsoleUser, lumaConsoleWorkspaces] = await Promise.all([
-				lumaConsoleUserForSupabaseUser(user.id),
-				lumaConsoleWorkspacesForSupabaseUser(user.id)
-			]);
-
-			if (lumaConsoleUser || lumaConsoleWorkspaces.length > 0) {
-				const workspaceRecords = lumaConsoleWorkspaces.map(({ id, name }) => ({
-					id,
-					name,
-					slug: id
-				})) satisfies WorkspaceRecord[];
-				const requestedWorkspace = url.searchParams.get('workspace');
-				const workspace =
-					lumaConsoleWorkspaces.find((record) => record.id === requestedWorkspace) ??
-					lumaConsoleWorkspaces[0] ??
-					null;
-				const activeWorkspaceRole = workspace ? plannerRoleFromLumaConsole(workspace.role) : null;
-				const [events, timelines] = workspace
-					? await Promise.all([
-							lumaConsoleEventsForWorkspace(workspace.id),
-							lumaConsoleTimelinesForWorkspace(workspace.id)
-						])
-					: [[], []];
-				const timelineRecords = timelines.map(timelineRecordFromLumaConsole);
-				const requestedTimeline = url.searchParams.get('timeline');
-				const activeTimelineRecord =
-					timelineRecords.find((timeline) => timeline.id === requestedTimeline) ??
-					timelineRecords[0];
-
-				let activeTimeline: TimelineSnapshot | null = null;
-				if (activeTimelineRecord) {
-					const [
-						{ title, view_start, view_end, pad_before_minutes, pad_after_minutes },
-						lanes,
-						blocks
-					] = await Promise.all([
-						Promise.resolve(activeTimelineRecord),
-						lumaConsoleTimelineLanes(activeTimelineRecord.id),
-						lumaConsoleTimelineBlocks(activeTimelineRecord.id)
-					]);
-
-					activeTimeline = {
-						id: activeTimelineRecord.id,
-						title,
-						viewStart: timeInput(view_start, '08:00'),
-						viewEnd: timeInput(view_end, '18:30'),
-						padBefore: pad_before_minutes,
-						padAfter: pad_after_minutes,
-						lanes: lanes.map((lane) => ({ id: lane.id, label: lane.name })),
-						blocks: blocks.map((block) => ({
-							id: block.id,
-							title: block.title,
-							icon: block.icon,
-							lane: block.lane_id,
-							type: block.block_type,
-							visibility: block.visibility,
-							start: timeInput(block.actual_start),
-							end: timeInput(block.actual_end, '09:30'),
-							advertisedStart: timeInput(block.advertised_start, timeInput(block.actual_start)),
-							advertisedEnd: timeInput(block.advertised_end, timeInput(block.actual_end, '09:30')),
-							bufferBefore: block.buffer_before_minutes,
-							bufferAfter: block.buffer_after_minutes,
-							owner: block.owner_label ?? '',
-							notes: block.notes
-						}))
-					};
-				}
-
-				return {
-					mode: 'luma-console' as const,
-					userEmail: user.email ?? null,
-					workspaces: workspaceRecords,
-					lumaEvents: events.map((event) => ({
-						id: event.id,
-						name: event.name,
-						starts_at: event.start_at,
-						ends_at: event.end_at,
-						url: event.url,
-						location: event.calendar_name
-					})) satisfies LumaEventRecord[],
-					timelines: timelineRecords,
-					members: [] as WorkspaceMemberRecord[],
-					invitations: [] as WorkspaceInvitationRecord[],
-					myInvitations: [] as WorkspaceInvitationRecord[],
-					currentProfile: lumaConsoleUser
-						? ({
-								email: lumaConsoleUser.email,
-								full_name: lumaConsoleUser.name,
-								avatar_url: lumaConsoleUser.avatar_url
-							} satisfies ProfileRecord)
-						: null,
-					currentUserId: lumaConsoleUser?.id ?? user.id,
-					activeWorkspaceRole,
-					activeWorkspaceLumaCalendarApiId: null as string | null,
-					activeWorkspaceId: workspace?.id ?? null,
-					activeTimeline
-				};
-			}
-		} catch (error) {
-			console.error('Could not load Luma console workspace data.', error);
-		}
 	}
 
 	const { data: currentProfile } = await locals.supabase
@@ -424,6 +281,11 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 	const activeWorkspaceRole = workspace
 		? await workspaceRole(locals.supabase, workspace.id, user.id)
 		: null;
+	const { data: activeWorkspaceLumaApiKeyConfigured } = workspace
+		? await locals.supabase.rpc('workspace_luma_api_key_configured', {
+				target_workspace_id: workspace.id
+			})
+		: { data: false };
 
 	const [{ data: lumaEvents }, { data: timelines }] = workspace
 		? await Promise.all([
@@ -538,9 +400,8 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 		currentProfile: (currentProfile ?? null) as ProfileRecord | null,
 		currentUserId: user.id,
 		activeWorkspaceRole,
-		activeWorkspaceLumaCalendarApiId: canManageWorkspace(activeWorkspaceRole)
-			? (workspace?.luma_calendar_api_id ?? null)
-			: null,
+		activeWorkspaceLumaCalendarApiId: workspace?.luma_calendar_api_id ?? null,
+		activeWorkspaceLumaApiKeyConfigured: Boolean(activeWorkspaceLumaApiKeyConfigured),
 		activeWorkspaceId: workspace?.id ?? null,
 		activeTimeline
 	};
@@ -691,11 +552,13 @@ export const actions: Actions = {
 		const form = await request.formData();
 		const workspaceId = String(form.get('workspaceId') ?? '');
 		const calendarApiId = optionalText(form.get('calendarApiId'), 120);
+		const lumaApiKey = optionalText(form.get('lumaApiKey'), 500);
 		if (!idPattern.test(workspaceId)) return actionFail(400, 'luma', 'Choose a valid workspace.');
 
 		const { error } = await locals.supabase.rpc('update_workspace_luma_source', {
 			target_workspace_id: workspaceId,
-			calendar_api_id: calendarApiId
+			calendar_api_id: calendarApiId,
+			luma_api_key: lumaApiKey
 		});
 
 		if (error) return actionFail(400, 'luma', error.message);
@@ -835,16 +698,37 @@ export const actions: Actions = {
 			return actionFail(403, 'luma', 'You do not have access to this workspace.');
 		}
 
-		const role = await workspaceRole(locals.supabase, workspaceId, user.id);
-		if (!canManageWorkspace(role)) {
-			return actionFail(403, 'luma', 'Only workspace owners and admins can sync Luma events.');
+		if (!(await workspaceRole(locals.supabase, workspaceId, user.id))) {
+			return actionFail(403, 'luma', 'You do not have access to this workspace.');
 		}
 		if (!workspace.luma_calendar_api_id) {
 			return actionFail(400, 'luma', "Set this workspace's Luma calendar API ID before syncing.");
 		}
 
+		const admin = createSupabaseAdminClient();
+		if (!admin) {
+			return actionFail(
+				503,
+				'luma',
+				'SUPABASE_SERVICE_ROLE_KEY is not configured, so workspace Luma keys cannot be read.'
+			);
+		}
+
+		const { data: lumaApiKey, error: credentialError } = await admin.rpc(
+			'workspace_luma_api_key_for_server',
+			{
+				target_workspace_id: workspaceId
+			}
+		);
+
+		if (credentialError) return actionFail(503, 'luma', credentialError.message);
+		if (!lumaApiKey) {
+			return actionFail(400, 'luma', "Set this workspace's Luma API key before syncing.");
+		}
+
 		const { events, error } = await fetchUpcomingLumaEvents(
 			fetch,
+			lumaApiKey,
 			50,
 			workspace.luma_calendar_api_id
 		);
@@ -877,20 +761,6 @@ export const actions: Actions = {
 		const eventId = String(form.get('eventId') ?? '');
 		if (!idPattern.test(workspaceId) || !idPattern.test(eventId)) {
 			return actionFail(400, 'luma', 'Choose a valid Luma event.');
-		}
-
-		if (lumaConsoleDatabaseConfigured()) {
-			let timelineId: string;
-			try {
-				timelineId = await createLumaConsoleTimelineFromEvent(user.id, workspaceId, eventId);
-			} catch (error) {
-				return actionFail(
-					400,
-					'luma',
-					error instanceof Error ? error.message : 'Could not create timeline.'
-				);
-			}
-			redirect(303, `/planner?workspace=${workspaceId}&timeline=${timelineId}`);
 		}
 
 		const { data: existingTimeline } = await locals.supabase
@@ -956,20 +826,6 @@ export const actions: Actions = {
 		if (!snapshot) return actionFail(400, 'save', 'Timeline data was incomplete.');
 		if (snapshot.lanes.length === 0)
 			return actionFail(400, 'save', 'A timeline needs at least one lane.');
-
-		if (lumaConsoleDatabaseConfigured()) {
-			let timelineId: string;
-			try {
-				timelineId = await saveLumaConsoleTimelineSnapshot(user.id, workspaceId, snapshot);
-			} catch (error) {
-				return actionFail(
-					400,
-					'save',
-					error instanceof Error ? error.message : 'Could not save the timeline.'
-				);
-			}
-			redirect(303, `/planner?workspace=${workspaceId}&timeline=${timelineId}`);
-		}
 
 		const { data: workspace, error: workspaceError } = await locals.supabase
 			.from('workspaces')

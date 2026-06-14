@@ -2,7 +2,7 @@
 	"name": "event-timeline-planner",
 	"private": true,
 	"version": "0.0.1",
-	"description": "A standalone event timeline planner with shared Luma console workspaces, Supabase Auth, and Railway deployment.",
+	"description": "A standalone event timeline planner with Supabase Auth, workspaces, invitations, and Railway deployment.",
 	"type": "module",
 	"packageManager": "bun@1.3.11",
 	"scripts": {
@@ -13,8 +13,6 @@
 		"prepare": "svelte-kit sync || echo ''",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-		"luma-console:schema": "bun run integrations/luma-console/scripts/apply-timeline-schema.ts",
-		"luma-console:verify": "bun run integrations/luma-console/scripts/verify-shared-deployment.ts",
 		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write ."
 	},
@@ -57,7 +55,6 @@
 		"@supabase/supabase-js": "^2.108.1",
 		"emoji-mart": "^5.6.0",
 		"interactjs": "^1.10.27",
-		"postgres": "^3.4.9",
 		"svelte-dnd-action": "^0.9.70"
 	}
 }

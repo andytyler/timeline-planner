@@ -1,5 +1,3 @@
-import { env } from '$env/dynamic/private';
-
 type LumaRecord = Record<string, unknown>;
 
 const LUMA_EVENTS_ENDPOINT = 'https://public-api.luma.com/v1/calendar/list-events';
@@ -81,17 +79,14 @@ function mapLumaEvent(value: unknown): SyncedLumaEvent | null {
 	};
 }
 
-export function hasLumaApiKey() {
-	return Boolean(env.LUMA_API_KEY);
-}
-
 export async function fetchUpcomingLumaEvents(
 	fetch: typeof globalThis.fetch,
+	apiKey: string,
 	limit = 50,
 	calendarApiId?: string | null
 ) {
-	if (!env.LUMA_API_KEY) {
-		return { events: [] as SyncedLumaEvent[], error: 'LUMA_API_KEY is not configured.' };
+	if (!apiKey.trim()) {
+		return { events: [] as SyncedLumaEvent[], error: 'A Luma API key is not configured.' };
 	}
 
 	const url = new URL(LUMA_EVENTS_ENDPOINT);
@@ -105,7 +100,7 @@ export async function fetchUpcomingLumaEvents(
 
 	const response = await fetch(url, {
 		headers: {
-			'x-luma-api-key': env.LUMA_API_KEY
+			'x-luma-api-key': apiKey
 		}
 	});
 

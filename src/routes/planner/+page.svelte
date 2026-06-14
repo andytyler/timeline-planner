@@ -17,6 +17,7 @@
 		timelineBlockDrag,
 		timelineBufferResizeHandle
 	} from '$lib/timeline-interactions';
+	import { SvelteURLSearchParams } from 'svelte/reactivity';
 	import type { ActionData, PageData } from './$types';
 
 	type ViewMode = 'combined' | 'advertised' | 'actual';
@@ -58,14 +59,12 @@
 	const canManageActiveWorkspace = $derived(
 		data.activeWorkspaceRole === 'owner' || data.activeWorkspaceRole === 'admin'
 	);
+	const canUseWorkspaceLuma = $derived(data.mode !== 'local' && Boolean(activeWorkspace));
 	const canEditActiveWorkspace = $derived(
 		data.mode === 'local' ||
-			(data.mode === 'supabase' &&
-				(data.activeWorkspaceRole === 'owner' ||
-					data.activeWorkspaceRole === 'admin' ||
-					data.activeWorkspaceRole === 'member')) ||
-			(data.mode === 'luma-console' &&
-				(data.activeWorkspaceRole === 'owner' || data.activeWorkspaceRole === 'admin'))
+			data.activeWorkspaceRole === 'owner' ||
+			data.activeWorkspaceRole === 'admin' ||
+			data.activeWorkspaceRole === 'member'
 	);
 	const timelineSnapshot = $derived({
 		id: data.activeTimeline?.id ?? null,
@@ -93,7 +92,7 @@
 	const nowMinutes = now.getHours() * 60 + now.getMinutes();
 
 	function plannerHref(params: Record<string, string | null | undefined> = {}) {
-		const search = new URLSearchParams();
+		const search = new SvelteURLSearchParams();
 		if (activeWorkspace) search.set('workspace', activeWorkspace.id);
 		for (const [key, value] of Object.entries(params)) {
 			if (value) search.set(key, value);
@@ -319,7 +318,7 @@
 							Workspace
 						</p>
 						<div class="grid gap-1">
-							{#each data.workspaces as workspace}
+							{#each data.workspaces as workspace (workspace.id)}
 								<a
 									class={[
 										'truncate rounded-md border px-3 py-2 text-sm font-black',
@@ -491,52 +490,6 @@
 				{#if data.mode === 'local'}
 					<div class="mb-2 font-black text-neutral-950">Local sample mode</div>
 					<p>Supabase is not configured, so edits stay in the browser prototype state.</p>
-				{:else if data.mode === 'luma-console' && activeWorkspace}
-					<div class="mb-2 font-black text-neutral-950">{activeWorkspace.name}</div>
-					<div class="mb-3 grid grid-cols-[34px_minmax(0,1fr)] items-center gap-2">
-						{#if data.currentProfile?.avatar_url}
-							<img
-								class="size-8 rounded-md border object-cover"
-								src={data.currentProfile.avatar_url}
-								alt=""
-							/>
-						{:else}
-							<div
-								class="grid size-8 place-items-center rounded-md border bg-white text-[11px] font-black text-neutral-500"
-							>
-								{(data.currentProfile?.full_name || data.userEmail || '?')
-									.slice(0, 1)
-									.toUpperCase()}
-							</div>
-						{/if}
-						<div class="min-w-0">
-							<p class="truncate font-black text-neutral-950">
-								{data.currentProfile?.full_name || data.userEmail}
-							</p>
-							<p class="truncate text-[10px] font-bold text-neutral-500">
-								{data.currentProfile?.email || data.userEmail}
-							</p>
-						</div>
-					</div>
-					<p>Shared Luma console workspace</p>
-					<p class="capitalize">Access: {data.activeWorkspaceRole ?? 'viewer'}</p>
-					<p>{data.lumaEvents.length} Luma events / {data.timelines.length} timelines</p>
-					{#if data.timelines.length > 0}
-						<div class="mt-2 grid gap-1">
-							{#each data.timelines as timeline}
-								<a
-									class="truncate rounded-md px-2 py-1 font-bold text-neutral-700 hover:bg-white"
-									href={plannerHref({ timeline: timeline.id })}
-								>
-									{timeline.title}
-								</a>
-							{/each}
-						</div>
-					{/if}
-					<a
-						class="mt-2 inline-flex h-7 items-center rounded-md border bg-white px-2 font-bold text-neutral-700"
-						href="/logout">Sign out</a
-					>
 				{:else if activeWorkspace}
 					<div class="mb-2 font-black text-neutral-950">{activeWorkspace.name}</div>
 					<div class="mb-3 grid grid-cols-[34px_minmax(0,1fr)] items-center gap-2">
@@ -611,7 +564,7 @@
 									{formMessage('invitation')}
 								</p>
 							{/if}
-							{#each data.myInvitations as invite}
+							{#each data.myInvitations as invite (invite.id)}
 								<form class="grid gap-1" method="POST" action="?/acceptInvitation">
 									<input type="hidden" name="invitationId" value={invite.id} />
 									<div class="text-[11px] font-bold text-neutral-500">Invited as {invite.role}</div>
@@ -625,7 +578,7 @@
 							{/each}
 						</div>
 					{/if}
-					{#if canManageActiveWorkspace}
+					{#if canUseWorkspaceLuma && activeWorkspace}
 						<form class="mt-2 grid gap-1 border-t pt-2" method="POST" action="?/updateLumaSource">
 							<input type="hidden" name="workspaceId" value={activeWorkspace.id} />
 							<label class="grid gap-1 font-bold text-neutral-500">
@@ -638,11 +591,29 @@
 									placeholder="cal-..."
 								/>
 							</label>
+							<label class="grid gap-1 font-bold text-neutral-500">
+								Luma API key
+								<input
+									class="h-8 rounded-md border bg-white px-2 font-semibold text-neutral-950"
+									name="lumaApiKey"
+									type="password"
+									autocomplete="off"
+									maxlength="500"
+									placeholder={data.activeWorkspaceLumaApiKeyConfigured
+										? 'Saved - enter a new key to replace'
+										: 'Paste workspace Luma API key'}
+								/>
+							</label>
+							<p class="text-[10px] leading-4 font-bold text-neutral-500">
+								{data.activeWorkspaceLumaApiKeyConfigured
+									? 'A Luma API key is saved for this workspace.'
+									: 'No Luma API key is saved for this workspace yet.'}
+							</p>
 							<button
 								class="h-7 rounded-md border bg-white px-2 text-[11px] font-black text-neutral-700"
 								type="submit"
 							>
-								Save Luma source
+								Save Luma settings
 							</button>
 						</form>
 						<form class="mt-2" method="POST" action="?/syncLumaEvents">
@@ -664,7 +635,7 @@
 					{/if}
 					{#if data.timelines.length > 0}
 						<div class="mt-2 grid gap-1">
-							{#each data.timelines as timeline}
+							{#each data.timelines as timeline (timeline.id)}
 								<a
 									class="truncate rounded-md px-2 py-1 font-bold text-neutral-700 hover:bg-white"
 									href={plannerHref({ timeline: timeline.id })}
@@ -688,7 +659,7 @@
 									{formMessage('invitation')}
 								</p>
 							{/if}
-							{#each data.myInvitations as invite}
+							{#each data.myInvitations as invite (invite.id)}
 								<form
 									class="grid gap-1 rounded-md border bg-white p-2"
 									method="POST"
@@ -783,7 +754,7 @@
 									{formMessage('member')}
 								</p>
 							{/if}
-							{#each data.members as member}
+							{#each data.members as member (member.user_id)}
 								<div class="grid gap-2 rounded-md border bg-white p-2">
 									<div class="min-w-0">
 										<div class="truncate font-bold text-neutral-700">{memberLabel(member)}</div>
@@ -804,7 +775,7 @@
 													class="h-7 rounded-md border bg-neutral-50 px-2 text-[11px] font-bold text-neutral-700"
 													name="role"
 												>
-													{#each memberRoleChoices() as role}
+													{#each memberRoleChoices() as role (role)}
 														<option value={role} selected={member.role === role}>{role}</option>
 													{/each}
 												</select>
@@ -841,7 +812,7 @@
 
 					{#if canManageActiveWorkspace && data.invitations.length > 0}
 						<div class="mt-3 grid gap-2 border-t pt-2">
-							{#each data.invitations as invite}
+							{#each data.invitations as invite (invite.id)}
 								<div class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
 									<div class="min-w-0">
 										<div class="truncate font-bold text-neutral-700">{invite.email}</div>
@@ -870,7 +841,7 @@
 					Luma Events
 				</p>
 				<div class="grid max-h-56 gap-2 overflow-auto pr-1">
-					{#each data.lumaEvents as event}
+					{#each data.lumaEvents as event (event.id)}
 						{@const linkedTimeline = timelineByEventId.get(event.id)}
 						<div class="rounded-md border bg-neutral-50 p-2">
 							<div class="text-xs leading-4 font-black text-neutral-950">{event.name}</div>
@@ -926,7 +897,7 @@
 					</p>
 				</div>
 				<div class="inline-flex overflow-hidden rounded-md border bg-neutral-100">
-					{#each ['combined', 'advertised', 'actual'] as mode}
+					{#each ['combined', 'advertised', 'actual'] as mode (mode)}
 						<button
 							type="button"
 							class={[
@@ -952,7 +923,7 @@
 					>
 						Time
 					</div>
-					{#each lanes as lane}
+					{#each lanes as lane (lane.id)}
 						<div
 							class="sticky top-0 z-20 grid h-[42px] items-center border-r border-b bg-white/95 px-3 text-xs font-black tracking-[0.08em] text-neutral-500 uppercase"
 						>
@@ -961,7 +932,7 @@
 					{/each}
 
 					<div class="relative border-r bg-neutral-50/70" style={`height:${timelineHeight}px;`}>
-						{#each Array.from({ length: Math.floor(viewDuration / 30) + 2 }, (_, i) => Math.ceil(viewStartMinutes / 30) * 30 + i * 30) as minute}
+						{#each Array.from({ length: Math.floor(viewDuration / 30) + 2 }, (_, i) => Math.ceil(viewStartMinutes / 30) * 30 + i * 30) as minute (minute)}
 							{#if minute <= viewEndMinutes}
 								<div
 									class="absolute right-3 -translate-y-2 text-xs font-bold text-neutral-500 tabular-nums"
@@ -973,7 +944,7 @@
 						{/each}
 					</div>
 
-					{#each lanes as lane}
+					{#each lanes as lane (lane.id)}
 						<div
 							role="region"
 							aria-label={`${lane.label} timeline lane`}
@@ -1108,7 +1079,7 @@
 														class="absolute top-7 left-0 z-40 grid gap-2 rounded-md border bg-white p-2 shadow-2xl"
 													>
 														<div class="grid grid-cols-8 gap-1">
-															{#each iconOptions as option}
+															{#each iconOptions as option (option.id)}
 																{@const Choice = iconComponent(option.id)}
 																<button
 																	type="button"
@@ -1282,7 +1253,7 @@
 									{/if}
 								</button>
 								<div class="grid grid-cols-8 gap-1">
-									{#each iconOptions as option}
+									{#each iconOptions as option (option.id)}
 										{@const Choice = iconComponent(option.id)}
 										<button
 											type="button"
@@ -1332,7 +1303,7 @@
 								bind:value={selectedBlock.lane}
 								disabled={!canEditActiveWorkspace}
 							>
-								{#each lanes as lane}
+								{#each lanes as lane (lane.id)}
 									<option value={lane.id}>{lane.label}</option>
 								{/each}
 							</select>
