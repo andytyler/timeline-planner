@@ -46,7 +46,7 @@ export const load: PageServerLoad = async ({ locals }) => {
 	const invitationRecords = (myInvitations ?? []) as WorkspaceInvitationRecord[];
 
 	if (workspaceRecords.length > 0 && invitationRecords.length === 0) {
-		redirect(303, `/planner?workspace=${workspaceRecords[0].id}`);
+		redirect(303, `/timelines?workspace=${workspaceRecords[0].id}`);
 	}
 
 	return {
@@ -77,7 +77,7 @@ export const actions: Actions = {
 			});
 		}
 
-		redirect(303, safeRedirectPath(`/planner?workspace=${workspaceId}`));
+		redirect(303, safeRedirectPath(`/timelines?workspace=${workspaceId}`));
 	},
 
 	acceptInvitation: async ({ locals, request }) => {
@@ -100,6 +100,6 @@ export const actions: Actions = {
 			});
 		}
 
-		redirect(303, safeRedirectPath(`/planner?workspace=${workspaceId}`));
+		redirect(303, safeRedirectPath(`/timelines?workspace=${workspaceId}`));
 	}
 };

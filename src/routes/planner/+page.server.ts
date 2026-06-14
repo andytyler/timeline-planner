@@ -1,8 +1,10 @@
 import {
+	minutesToTime,
 	type TimelineBlock,
 	type TimelineBlockType,
 	type TimelineSnapshot,
-	type TimelineVisibility
+	type TimelineVisibility,
+	timeToMinutes
 } from '$lib/timeline';
 import { fail, redirect } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
@@ -80,6 +82,19 @@ function nonNegativeNumber(value: unknown, fallback = 0) {
 	return Math.max(0, Math.round(number));
 }
 
+function orderedEnd(start: string, end: string, minimumMinutes = 5) {
+	const startMinutes = timeToMinutes(start);
+	const endMinutes = timeToMinutes(end);
+	if (endMinutes > startMinutes) return end;
+	return minutesToTime(startMinutes + minimumMinutes);
+}
+
+function normalizeBlockType(value: unknown): TimelineBlockType {
+	if (value === 'active' || value === 'side') return 'scheduled';
+	if (value === 'scheduled' || value === 'planning' || value === 'milestone') return value;
+	return 'planning';
+}
+
 function normalizeSnapshot(raw: unknown): TimelineSnapshot | null {
 	if (!raw || typeof raw !== 'object') return null;
 	const snapshot = raw as Partial<TimelineSnapshot>;
@@ -96,15 +111,19 @@ function normalizeSnapshot(raw: unknown): TimelineSnapshot | null {
 
 	const blocks = snapshot.blocks
 		.map((block) => {
-			const type = ['planning', 'active', 'side'].includes(String(block?.type))
-				? (block?.type as TimelineBlockType)
-				: 'planning';
+			const type = normalizeBlockType(block?.type);
 			const visibility = ['internal', 'external'].includes(String(block?.visibility))
 				? (block?.visibility as TimelineVisibility)
 				: 'internal';
 			const lane = laneIds.has(String(block?.lane)) ? String(block?.lane) : lanes[0]?.id;
 			const start = timeInput(block?.start, '09:00');
-			const end = timeInput(block?.end, '09:30');
+			const rawEnd = timeInput(block?.end, '09:30');
+			const end = type === 'milestone' ? start : orderedEnd(start, rawEnd);
+			const advertisedStart = type === 'scheduled' ? timeInput(block?.advertisedStart, start) : '';
+			const advertisedEnd =
+				type === 'scheduled'
+					? orderedEnd(advertisedStart, timeInput(block?.advertisedEnd, end))
+					: '';
 
 			return {
 				id: String(block?.id ?? '').trim() || crypto.randomUUID(),
@@ -115,8 +134,8 @@ function normalizeSnapshot(raw: unknown): TimelineSnapshot | null {
 				visibility,
 				start,
 				end,
-				advertisedStart: timeInput(block?.advertisedStart, start),
-				advertisedEnd: timeInput(block?.advertisedEnd, end),
+				advertisedStart,
+				advertisedEnd,
 				bufferBefore: nonNegativeNumber(block?.bufferBefore, 0),
 				bufferAfter: nonNegativeNumber(block?.bufferAfter, 0),
 				owner: String(block?.owner ?? '').trim(),
@@ -249,7 +268,7 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 				title: block.title,
 				icon: block.icon,
 				lane: block.lane_id,
-				type: block.block_type,
+				type: normalizeBlockType(block.block_type),
 				visibility: block.visibility,
 				start: timeInput(block.actual_start),
 				end: timeInput(block.actual_end, '09:30'),
@@ -407,6 +426,7 @@ export const actions: Actions = {
 		}
 
 		const form = await request.formData();
+		const isAutosave = String(form.get('autosave') ?? '') === 'true';
 		const workspaceId = String(form.get('workspaceId') ?? '');
 		if (!idPattern.test(workspaceId)) return actionFail(400, 'save', 'Choose a valid workspace.');
 
@@ -447,6 +467,14 @@ export const actions: Actions = {
 
 		if (saveError || !timelineId) {
 			return actionFail(400, 'save', saveError?.message ?? 'Could not save the timeline.');
+		}
+
+		if (isAutosave) {
+			return {
+				intent: 'save' as const,
+				message: 'Saved',
+				timelineId
+			};
 		}
 
 		redirect(303, `/planner?workspace=${workspaceId}&timeline=${timelineId}`);

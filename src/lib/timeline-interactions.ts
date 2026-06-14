@@ -13,16 +13,21 @@ export type TimelineBlockDragParams = {
 export type TimelineActualResizeParams = {
 	block: TimelineBlock;
 	edge: 'start' | 'end';
+	target?: 'actual' | 'advertised';
+	laneSelector: string;
 	minuteHeight: number;
 	onSelect: (id: string) => void;
+	viewStartMinutes: number;
 	disabled?: boolean;
 };
 
 export type TimelineBufferResizeParams = {
 	block: TimelineBlock;
 	edge: 'before' | 'after';
+	laneSelector: string;
 	minuteHeight: number;
 	onSelect: (id: string) => void;
+	viewStartMinutes: number;
 	disabled?: boolean;
 };
 
@@ -47,6 +52,32 @@ function eventClientPoint(event: {
 
 function setDraggingClass(node: HTMLElement, active: boolean) {
 	node.classList.toggle('cursor-grabbing', active);
+}
+
+function scrollDuringVerticalDrag(
+	node: HTMLElement,
+	event: { clientY?: number; client?: { y?: number } }
+) {
+	const container = node.closest<HTMLElement>('[data-timeline-scroll]');
+	const point = eventClientPoint(event);
+	const margin = 56;
+	const amount = 28;
+
+	if (container && container.scrollHeight > container.clientHeight) {
+		const rect = container.getBoundingClientRect();
+		if (point.y < rect.top + margin) {
+			container.scrollTop = Math.max(0, container.scrollTop - amount);
+		} else if (point.y > rect.bottom - margin) {
+			container.scrollTop += amount;
+		}
+		return;
+	}
+
+	if (point.y < margin) {
+		window.scrollBy(0, -amount);
+	} else if (point.y > window.innerHeight - margin) {
+		window.scrollBy(0, amount);
+	}
 }
 
 export function timelineBlockDrag(node: HTMLElement, params: TimelineBlockDragParams) {
@@ -90,7 +121,6 @@ export function timelineBlockDrag(node: HTMLElement, params: TimelineBlockDragPa
 
 		interactable = interact(node).draggable({
 			enabled: !current.disabled,
-			allowFrom: '[data-block-drag-surface]',
 			ignoreFrom: 'button,input,textarea,select,a,[data-no-drag]',
 			listeners: {
 				start() {
@@ -135,7 +165,37 @@ export function timelineActualResizeHandle(node: HTMLElement, params: TimelineAc
 	let cancelled = false;
 	let originStart = 0;
 	let originEnd = 0;
-	let totalPixels = 0;
+	let pointerMinuteOffset = 0;
+
+	function startKey() {
+		return current.target === 'advertised' ? 'advertisedStart' : 'start';
+	}
+
+	function endKey() {
+		return current.target === 'advertised' ? 'advertisedEnd' : 'end';
+	}
+
+	function pointerMinutes(event: { clientY?: number; client?: { y?: number } }) {
+		const lane = node.closest<HTMLElement>(current.laneSelector);
+		const laneTop = lane?.getBoundingClientRect().top ?? 0;
+		const point = eventClientPoint(event);
+		return current.viewStartMinutes + roundedMinutes(point.y - laneTop, current.minuteHeight);
+	}
+
+	function updateFromPointer(event: { clientY?: number; client?: { y?: number } }) {
+		scrollDuringVerticalDrag(node, event);
+		const nextMinute = pointerMinutes(event) - pointerMinuteOffset;
+
+		if (current.edge === 'start') {
+			const nextStart = clamp(nextMinute, 0, originEnd - 5);
+			current.block[startKey()] = minutesToTime(nextStart);
+			current.block[endKey()] = minutesToTime(originEnd);
+		} else {
+			const nextEnd = clamp(nextMinute, originStart + 5, 23 * 60 + 59);
+			current.block[startKey()] = minutesToTime(originStart);
+			current.block[endKey()] = minutesToTime(nextEnd);
+		}
+	}
 
 	async function setup() {
 		const { default: interact } = await import('interactjs');
@@ -144,28 +204,19 @@ export function timelineActualResizeHandle(node: HTMLElement, params: TimelineAc
 		interactable = interact(node).draggable({
 			enabled: !current.disabled,
 			listeners: {
-				start() {
+				start(event) {
 					if (current.disabled) return;
-					originStart = timeToMinutes(current.block.start);
-					originEnd = timeToMinutes(current.block.end);
-					totalPixels = 0;
+					originStart = timeToMinutes(current.block[startKey()]);
+					originEnd = timeToMinutes(current.block[endKey()]);
 					current.onSelect(current.block.id);
+					pointerMinuteOffset = event
+						? pointerMinutes(event) - (current.edge === 'start' ? originStart : originEnd)
+						: 0;
 					setDraggingClass(node, true);
 				},
 				move(event) {
 					if (current.disabled) return;
-					totalPixels += event.dy ?? 0;
-					const delta = roundedMinutes(totalPixels, current.minuteHeight);
-
-					if (current.edge === 'start') {
-						current.block.start = minutesToTime(
-							Math.min(originEnd - 5, Math.max(0, originStart + delta))
-						);
-					} else {
-						current.block.end = minutesToTime(
-							Math.max(originStart + 5, Math.min(23 * 60 + 59, originEnd + delta))
-						);
-					}
+					updateFromPointer(event);
 				},
 				end() {
 					setDraggingClass(node, false);
@@ -192,8 +243,17 @@ export function timelineBufferResizeHandle(node: HTMLElement, params: TimelineBu
 	let current = params;
 	let interactable: ReturnType<InteractModule['default']> | null = null;
 	let cancelled = false;
-	let origin = 0;
-	let totalPixels = 0;
+	let originStart = 0;
+	let originEnd = 0;
+	let originBuffer = 0;
+	let pointerMinuteOffset = 0;
+
+	function pointerMinutes(event: { clientY?: number; client?: { y?: number } }) {
+		const lane = node.closest<HTMLElement>(current.laneSelector);
+		const laneTop = lane?.getBoundingClientRect().top ?? 0;
+		const point = eventClientPoint(event);
+		return current.viewStartMinutes + roundedMinutes(point.y - laneTop, current.minuteHeight);
+	}
 
 	async function setup() {
 		const { default: interact } = await import('interactjs');
@@ -202,23 +262,27 @@ export function timelineBufferResizeHandle(node: HTMLElement, params: TimelineBu
 		interactable = interact(node).draggable({
 			enabled: !current.disabled,
 			listeners: {
-				start() {
+				start(event) {
 					if (current.disabled) return;
-					origin =
+					originStart = timeToMinutes(current.block.start);
+					originEnd = timeToMinutes(current.block.end);
+					originBuffer =
 						current.edge === 'before' ? current.block.bufferBefore : current.block.bufferAfter;
-					totalPixels = 0;
 					current.onSelect(current.block.id);
+					const originEdge =
+						current.edge === 'before' ? originStart - originBuffer : originEnd + originBuffer;
+					pointerMinuteOffset = event ? pointerMinutes(event) - originEdge : 0;
 					setDraggingClass(node, true);
 				},
 				move(event) {
 					if (current.disabled) return;
-					totalPixels += event.dy ?? 0;
-					const delta = roundedMinutes(totalPixels, current.minuteHeight);
+					scrollDuringVerticalDrag(node, event);
+					const nextMinute = pointerMinutes(event) - pointerMinuteOffset;
 
 					if (current.edge === 'before') {
-						current.block.bufferBefore = Math.max(0, origin - delta);
+						current.block.bufferBefore = Math.max(0, originStart - nextMinute);
 					} else {
-						current.block.bufferAfter = Math.max(0, origin + delta);
+						current.block.bufferAfter = Math.max(0, nextMinute - originEnd);
 					}
 				},
 				end() {

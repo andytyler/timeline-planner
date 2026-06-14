@@ -1,5 +1,7 @@
 <script lang="ts">
-	import { Check, Clock, LayoutGrid, List, Mic, Play, Sparkles, Users } from '@lucide/svelte';
+	import { deserialize } from '$app/forms';
+	import { Check, Clock, LayoutGrid, List, Mic, Play, Plus, Sparkles, Users } from '@lucide/svelte';
+	import { Popover } from 'bits-ui';
 	import {
 		cloneBlocks,
 		cloneLanes,
@@ -21,11 +23,15 @@
 	import type { ActionData, PageData } from './$types';
 
 	type ViewMode = 'combined' | 'advertised' | 'actual';
+	type AutosaveStatus = 'idle' | 'pending' | 'saving' | 'saved' | 'error';
+	type SaveActionSuccess = { intent?: string; message?: string; timelineId?: string };
+	type SaveActionFailure = { intent?: string; message?: string };
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
 
 	const minuteHeight = 2;
 	const laneWidth = 260;
+	const resizeHandleHitPixels = 24;
 	const iconOptions = [
 		{ id: 'play', label: 'Play' },
 		{ id: 'list', label: 'List' },
@@ -50,6 +56,14 @@
 	let pageTitle = $state('Event Timeline');
 	let timelineTitle = $state('Launch Meetup Run of Show');
 	let loadedTimelineKey = $state<string | null>(null);
+	let autosavedTimelineId = $state<string | null>(null);
+	let autosaveStatus = $state<AutosaveStatus>('idle');
+	let autosaveMessage = $state('');
+	let timelineScrollElement: HTMLDivElement | null = $state(null);
+	let lastAutosaveKey: string | null = null;
+	let lastAutosaveSignature = '';
+	let autosaveSequence = 0;
+	let initialTimelineScrollKey = '';
 
 	const selectedBlock = $derived(blocks.find((block) => block.id === selectedId));
 	const activeWorkspace = $derived(
@@ -63,7 +77,7 @@
 			data.activeWorkspaceRole === 'member'
 	);
 	const timelineSnapshot = $derived({
-		id: data.activeTimeline?.id ?? null,
+		id: autosavedTimelineId ?? data.activeTimeline?.id ?? null,
 		title: timelineTitle,
 		viewStart,
 		viewEnd,
@@ -79,13 +93,24 @@
 				.map((timeline) => [timeline.luma_event_id, timeline])
 		)
 	);
-	const viewStartMinutes = $derived(timeToMinutes(viewStart) - padBefore);
-	const viewEndMinutes = $derived(timeToMinutes(viewEnd) + padAfter);
+	const displayStartMinutes = $derived(timeToMinutes(viewStart) - padBefore);
+	const viewStartMinutes = 0;
+	const viewEndMinutes = 23 * 60 + 59;
 	const viewDuration = $derived(Math.max(60, viewEndMinutes - viewStartMinutes));
 	const timelineHeight = $derived(Math.max(720, viewDuration * minuteHeight));
 	const timelineWidth = $derived(76 + lanes.length * laneWidth);
 	const now = new Date();
 	const nowMinutes = now.getHours() * 60 + now.getMinutes();
+	const displaySummary = $derived(
+		`${viewStart}-${viewEnd} with ${padBefore}m before / ${padAfter}m after`
+	);
+	const autosaveLabel = $derived.by(() => {
+		if (autosaveStatus === 'pending') return 'Autosave pending';
+		if (autosaveStatus === 'saving') return 'Autosaving...';
+		if (autosaveStatus === 'saved') return 'Autosaved';
+		if (autosaveStatus === 'error') return autosaveMessage || 'Autosave failed';
+		return 'Autosave ready';
+	});
 
 	function plannerHref(params: Record<string, string | null | undefined> = {}) {
 		const search = new SvelteURLSearchParams();
@@ -117,29 +142,136 @@
 		padBefore = timeline?.padBefore ?? 30;
 		padAfter = timeline?.padAfter ?? 45;
 		timelineTitle = timeline?.title ?? 'Launch Meetup Run of Show';
+		autosavedTimelineId = timeline?.id ?? null;
 		loadedTimelineKey = nextKey;
+		initialTimelineScrollKey = '';
 	});
 
+	$effect(() => {
+		const key = `${loadedTimelineKey ?? 'loading'}:${viewStart}:${padBefore}`;
+		if (!timelineScrollElement || !loadedTimelineKey || initialTimelineScrollKey === key) return;
+		const nextScrollTop = Math.max(0, displayStartMinutes * minuteHeight - 24);
+		if (timelineScrollElement.scrollHeight > timelineScrollElement.clientHeight) {
+			timelineScrollElement.scrollTop = nextScrollTop;
+		} else {
+			window.scrollTo({ top: nextScrollTop, behavior: 'auto' });
+		}
+		initialTimelineScrollKey = key;
+	});
+
+	$effect(() => {
+		const workspaceId = activeWorkspace?.id;
+		const canAutosave = data.mode === 'supabase' && Boolean(workspaceId) && canEditActiveWorkspace;
+		const key = `${data.mode}:${workspaceId ?? 'none'}:${timelineSnapshot.id ?? 'draft'}`;
+		const signature = JSON.stringify(timelineSnapshot);
+
+		if (!canAutosave || !workspaceId) {
+			autosaveStatus = 'idle';
+			autosaveMessage = '';
+			return;
+		}
+
+		if (lastAutosaveKey !== key) {
+			lastAutosaveKey = key;
+			lastAutosaveSignature = signature;
+			autosaveStatus = 'saved';
+			autosaveMessage = '';
+			return;
+		}
+
+		if (signature === lastAutosaveSignature) return;
+
+		autosaveStatus = 'pending';
+		autosaveMessage = '';
+		const timeout = setTimeout(() => {
+			void autosaveTimeline(workspaceId, signature);
+		}, 900);
+
+		return () => clearTimeout(timeout);
+	});
+
+	async function autosaveTimeline(workspaceId: string, snapshotJson: string) {
+		const sequence = ++autosaveSequence;
+		const formData = new FormData();
+		formData.set('workspaceId', workspaceId);
+		formData.set('snapshot', snapshotJson);
+		formData.set('autosave', 'true');
+
+		autosaveStatus = 'saving';
+
+		try {
+			const response = await fetch('?/saveTimeline', {
+				method: 'POST',
+				body: formData,
+				headers: {
+					'x-sveltekit-action': 'true'
+				}
+			});
+			const result = deserialize<SaveActionSuccess, SaveActionFailure>(await response.text());
+			if (sequence !== autosaveSequence) return;
+
+			if (result.type === 'success') {
+				const timelineId = result.data?.timelineId;
+				if (timelineId) {
+					autosavedTimelineId = timelineId;
+					if (!data.activeTimeline?.id) {
+						window.history.replaceState(
+							window.history.state,
+							'',
+							plannerHref({ timeline: timelineId })
+						);
+					}
+				}
+				lastAutosaveSignature = snapshotJson;
+				autosaveStatus = 'saved';
+				autosaveMessage = '';
+			} else if (result.type === 'failure') {
+				autosaveStatus = 'error';
+				autosaveMessage = result.data?.message ?? 'Autosave failed';
+			} else {
+				autosaveStatus = 'error';
+				autosaveMessage = 'Autosave did not complete';
+			}
+		} catch (error) {
+			if (sequence !== autosaveSequence) return;
+			autosaveStatus = 'error';
+			autosaveMessage = error instanceof Error ? error.message : 'Autosave failed';
+		}
+	}
+
 	function typeLabel(type: TimelineBlockType) {
-		if (type === 'active') return 'Active';
+		if (type === 'scheduled') return 'Scheduled';
+		if (type === 'milestone') return 'Milestone';
+		if (type === 'active') return 'Scheduled';
 		if (type === 'side') return 'Side';
 		return 'Planning';
 	}
 
 	function blockColors(type: TimelineBlockType) {
-		if (type === 'active') return 'border-emerald-900/20 bg-emerald-50 text-emerald-950';
+		if (type === 'scheduled' || type === 'active')
+			return 'border-emerald-900/20 bg-emerald-50 text-emerald-950';
 		if (type === 'side') return 'border-violet-900/20 bg-violet-50 text-violet-950';
+		if (type === 'milestone') return 'border-amber-900/20 bg-amber-50 text-amber-950';
 		return 'border-blue-900/20 bg-blue-50 text-blue-950';
 	}
 
 	function iconColor(type: TimelineBlockType) {
-		if (type === 'active') return 'bg-emerald-700 text-white';
+		if (type === 'scheduled' || type === 'active') return 'bg-emerald-700 text-white';
 		if (type === 'side') return 'bg-violet-600 text-white';
+		if (type === 'milestone') return 'bg-amber-600 text-white';
 		return 'bg-blue-600 text-white';
 	}
 
+	function hasAdvertisedLayer(block: TimelineBlock) {
+		return block.type === 'scheduled' || block.type === 'active' || block.type === 'side';
+	}
+
+	function isMilestone(block: TimelineBlock) {
+		return block.type === 'milestone';
+	}
+
 	function visibleRange(block: TimelineBlock) {
-		if (viewMode === 'advertised') {
+		if (viewMode === 'advertised' && hasAdvertisedLayer(block)) {
 			return {
 				start: timeToMinutes(block.advertisedStart),
 				end: timeToMinutes(block.advertisedEnd),
@@ -149,17 +281,21 @@
 			};
 		}
 		if (viewMode === 'actual') {
+			const start = timeToMinutes(block.start);
+			const end = isMilestone(block) ? start : timeToMinutes(block.end);
 			return {
-				start: timeToMinutes(block.start),
-				end: timeToMinutes(block.end),
+				start,
+				end,
 				before: 0,
 				after: 0,
 				advertisedOnly: false
 			};
 		}
+		const actualStart = timeToMinutes(block.start);
+		const actualEnd = isMilestone(block) ? actualStart : timeToMinutes(block.end);
 		return {
-			start: timeToMinutes(block.start) - block.bufferBefore,
-			end: timeToMinutes(block.end) + block.bufferAfter,
+			start: actualStart - block.bufferBefore,
+			end: actualEnd + block.bufferAfter,
 			before: block.bufferBefore,
 			after: block.bufferAfter,
 			advertisedOnly: false
@@ -176,7 +312,116 @@
 
 	function blockHeight(block: TimelineBlock) {
 		const range = visibleRange(block);
-		return Math.max(28, (range.end - range.start) * minuteHeight);
+		if (range.advertisedOnly) return Math.max(28, (range.end - range.start) * minuteHeight);
+		return range.before * minuteHeight + actualBlockHeight(block) + range.after * minuteHeight;
+	}
+
+	function actualCardStyle(block: TimelineBlock) {
+		const range = visibleRange(block);
+		const top = range.advertisedOnly ? 0 : range.before * minuteHeight;
+		const height = actualBlockHeight(block);
+		return `top:${top}px; height:${height}px; min-height:${height}px;`;
+	}
+
+	function actualHandleStyle(block: TimelineBlock, edge: 'start' | 'end') {
+		const range = visibleRange(block);
+		const top = range.advertisedOnly ? 0 : range.before * minuteHeight;
+		const height = actualBlockHeight(block);
+		const handleTop =
+			edge === 'start' ? top - resizeHandleHitPixels / 2 : top + height - resizeHandleHitPixels / 2;
+		return `top:${handleTop}px;`;
+	}
+
+	function addBufferButtonStyle(block: TimelineBlock, edge: 'before' | 'after') {
+		const range = visibleRange(block);
+		const top = range.advertisedOnly ? 0 : range.before * minuteHeight;
+		const height = actualBlockHeight(block);
+		const buttonTop = edge === 'before' ? top - 32 : top + height + 4;
+		return `top:${buttonTop}px;`;
+	}
+
+	function bufferBeforeStyle(block: TimelineBlock) {
+		const range = visibleRange(block);
+		return `top:0px; height:${Math.max(12, range.before * minuteHeight)}px;`;
+	}
+
+	function bufferAfterStyle(block: TimelineBlock) {
+		const range = visibleRange(block);
+		const top = range.before * minuteHeight + actualBlockHeight(block);
+		return `top:${top}px; height:${Math.max(12, range.after * minuteHeight)}px;`;
+	}
+
+	function actualBlockHeight(block: TimelineBlock) {
+		if (isMilestone(block)) return 28;
+		const start =
+			viewMode === 'advertised' && hasAdvertisedLayer(block) ? block.advertisedStart : block.start;
+		const end =
+			viewMode === 'advertised' && hasAdvertisedLayer(block) ? block.advertisedEnd : block.end;
+		return Math.max(32, (timeToMinutes(end) - timeToMinutes(start)) * minuteHeight);
+	}
+
+	function advertisedChanged(block: TimelineBlock) {
+		if (!hasAdvertisedLayer(block)) return false;
+		return block.advertisedStart !== block.start || block.advertisedEnd !== block.end;
+	}
+
+	function advertisedBoxStyle(block: TimelineBlock) {
+		const { top, height } = advertisedMetrics(block);
+		return `top:${top}px; height:${height}px;`;
+	}
+
+	function advertisedHandleStyle(block: TimelineBlock, edge: 'start' | 'end') {
+		const { top, height } = advertisedMetrics(block);
+		const handleTop =
+			edge === 'start' ? top - resizeHandleHitPixels / 2 : top + height - resizeHandleHitPixels / 2;
+		return `top:${handleTop}px;`;
+	}
+
+	function advertisedMetrics(block: TimelineBlock) {
+		const cardHeight = actualBlockHeight(block);
+		if (viewMode === 'advertised') {
+			return {
+				top: 0,
+				height: Math.max(12, cardHeight)
+			};
+		}
+
+		const range = visibleRange(block);
+		const advertisedStart = timeToMinutes(block.advertisedStart);
+		const advertisedEnd = timeToMinutes(block.advertisedEnd);
+		const rawTop = (advertisedStart - range.start) * minuteHeight;
+		const rawHeight = (advertisedEnd - advertisedStart) * minuteHeight;
+
+		return { top: rawTop, height: Math.max(12, rawHeight) };
+	}
+
+	function displayedStart(block: TimelineBlock) {
+		return viewMode === 'advertised' && hasAdvertisedLayer(block)
+			? block.advertisedStart
+			: block.start;
+	}
+
+	function displayedEnd(block: TimelineBlock) {
+		if (isMilestone(block)) return block.start;
+		return viewMode === 'advertised' && hasAdvertisedLayer(block) ? block.advertisedEnd : block.end;
+	}
+
+	function displayedTimeLabel(block: TimelineBlock) {
+		if (isMilestone(block)) return displayedStart(block);
+		return `${displayedStart(block)}-${displayedEnd(block)}`;
+	}
+
+	function advertisedDurationLabel(block: TimelineBlock) {
+		return durationLabel(block.advertisedStart, block.advertisedEnd);
+	}
+
+	function bufferStartLabel(block: TimelineBlock) {
+		return minutesToTime(timeToMinutes(block.start) - block.bufferBefore);
+	}
+
+	function bufferEndLabel(block: TimelineBlock) {
+		const end = isMilestone(block) ? timeToMinutes(block.start) : timeToMinutes(block.end);
+		return minutesToTime(end + block.bufferAfter);
 	}
 
 	function nudgeSelected(minutes: number) {
@@ -220,10 +465,32 @@
 		selectedId = block.id;
 	}
 
+	function setBlockType(block: TimelineBlock, type: TimelineBlockType) {
+		if (!canEditActiveWorkspace) return;
+		block.type = type;
+		if (type === 'milestone') {
+			block.end = block.start;
+			block.advertisedStart = block.start;
+			block.advertisedEnd = block.start;
+		}
+		if (type === 'scheduled') {
+			block.advertisedStart = block.advertisedStart || block.start;
+			block.advertisedEnd = block.advertisedEnd || block.end;
+		}
+	}
+
+	function syncMilestoneTime(block: TimelineBlock) {
+		if (!isMilestone(block)) return;
+		block.end = block.start;
+		block.advertisedStart = block.start;
+		block.advertisedEnd = block.start;
+	}
+
 	function cycleType(block: TimelineBlock) {
 		if (!canEditActiveWorkspace) return;
-		const order: TimelineBlockType[] = ['planning', 'active', 'side'];
-		block.type = order[(order.indexOf(block.type) + 1) % order.length];
+		const order: TimelineBlockType[] = ['scheduled', 'planning', 'milestone'];
+		const current = order.includes(block.type) ? block.type : 'scheduled';
+		setBlockType(block, order[(order.indexOf(current) + 1) % order.length]);
 	}
 
 	function isEmojiIcon(icon: string) {
@@ -316,6 +583,16 @@
 								Save timeline
 							</button>
 						</form>
+						<p
+							class={[
+								'rounded-md border px-2 py-1 text-[11px] font-bold',
+								autosaveStatus === 'error'
+									? 'border-red-200 bg-red-50 text-red-700'
+									: 'border-neutral-200 bg-neutral-50 text-neutral-500'
+							]}
+						>
+							{autosaveLabel}
+						</p>
 						{#if formMessage('save')}
 							<p
 								class="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[11px] font-bold text-red-700"
@@ -359,52 +636,6 @@
 					</div>
 				{/if}
 			{/if}
-
-			<p class="mb-2 text-[11px] font-black tracking-[0.12em] text-neutral-500 uppercase">
-				Display View
-			</p>
-			<div class="grid grid-cols-2 gap-2">
-				<label class="grid gap-1 text-xs font-bold text-neutral-500">
-					Start
-					<input
-						aria-label="Display start time"
-						class="h-10 rounded-md border bg-neutral-50 px-3 font-semibold text-neutral-950"
-						type="time"
-						bind:value={viewStart}
-					/>
-				</label>
-				<label class="grid gap-1 text-xs font-bold text-neutral-500">
-					End
-					<input
-						aria-label="Display end time"
-						class="h-10 rounded-md border bg-neutral-50 px-3 font-semibold text-neutral-950"
-						type="time"
-						bind:value={viewEnd}
-					/>
-				</label>
-				<label class="grid gap-1 text-xs font-bold text-neutral-500">
-					Before
-					<input
-						aria-label="Display buffer before minutes"
-						class="h-10 rounded-md border bg-neutral-50 px-3 font-semibold text-neutral-950"
-						type="number"
-						min="0"
-						step="5"
-						bind:value={padBefore}
-					/>
-				</label>
-				<label class="grid gap-1 text-xs font-bold text-neutral-500">
-					After
-					<input
-						aria-label="Display buffer after minutes"
-						class="h-10 rounded-md border bg-neutral-50 px-3 font-semibold text-neutral-950"
-						type="number"
-						min="0"
-						step="5"
-						bind:value={padAfter}
-					/>
-				</label>
-			</div>
 
 			<p class="mt-5 mb-2 text-[11px] font-black tracking-[0.12em] text-neutral-500 uppercase">
 				Quick Reorganise
@@ -464,6 +695,12 @@
 					<p>{data.lumaEvents.length} Luma events / {data.timelines.length} timelines</p>
 					<a
 						class="mt-3 inline-flex h-8 w-full items-center justify-center rounded-md border bg-white px-2 font-black text-neutral-700"
+						href={`/timelines?workspace=${activeWorkspace.id}`}
+					>
+						All planners
+					</a>
+					<a
+						class="mt-2 inline-flex h-8 w-full items-center justify-center rounded-md border bg-white px-2 font-black text-neutral-700"
 						href={`/settings?workspace=${activeWorkspace.id}`}
 					>
 						Workspace settings
@@ -527,17 +764,79 @@
 		<section
 			class="grid min-w-0 grid-rows-[auto_1fr] overflow-hidden rounded-lg border bg-white/95 shadow-xl shadow-neutral-950/10"
 		>
-			<header class="flex items-center justify-between gap-4 border-b px-4 py-3">
-				<div class="min-w-0">
+			<header class="flex items-start justify-between gap-4 border-b px-8 py-4">
+				<div class="min-w-0 flex-1">
 					<input
 						aria-label="Timeline title"
-						class="w-full rounded-md bg-transparent px-1 py-0 text-sm font-bold hover:bg-neutral-100 read-only:hover:bg-transparent focus:bg-neutral-100 focus:outline-none read-only:focus:bg-transparent"
+						class="w-full rounded-md bg-transparent px-1 py-0 text-base leading-tight font-black tracking-normal hover:bg-neutral-100 read-only:hover:bg-transparent focus:bg-neutral-100 focus:outline-none read-only:focus:bg-transparent"
 						bind:value={timelineTitle}
 						readonly={!canEditActiveWorkspace}
 					/>
-					<p class="text-xs text-neutral-500">
-						{viewStart}-{viewEnd} with {padBefore}m before / {padAfter}m after
-					</p>
+					<Popover.Root>
+						<Popover.Trigger
+							type="button"
+							disabled={!canEditActiveWorkspace}
+							class="mt-1 inline-flex max-w-full rounded-md px-1 py-0.5 text-left text-sm leading-tight font-bold text-neutral-500 transition hover:bg-neutral-100 hover:text-neutral-700 focus:bg-neutral-100 focus:text-neutral-700 focus:outline-none disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-neutral-500"
+							aria-label="Configure display view"
+						>
+							<span class="truncate">{displaySummary}</span>
+						</Popover.Trigger>
+						<Popover.Portal>
+							<Popover.Content
+								side="bottom"
+								align="start"
+								sideOffset={8}
+								class="z-50 w-[360px] rounded-md border bg-white p-4 shadow-xl shadow-neutral-950/15"
+							>
+								<div class="grid gap-4">
+									<div class="grid grid-cols-2 gap-3">
+										<label class="grid gap-1 text-xs font-bold text-neutral-500">
+											Start
+											<input
+												aria-label="Display start time"
+												class="h-10 rounded-md border bg-neutral-50 px-3 font-semibold text-neutral-950"
+												type="time"
+												bind:value={viewStart}
+											/>
+										</label>
+										<label class="grid gap-1 text-xs font-bold text-neutral-500">
+											End
+											<input
+												aria-label="Display end time"
+												class="h-10 rounded-md border bg-neutral-50 px-3 font-semibold text-neutral-950"
+												type="time"
+												bind:value={viewEnd}
+											/>
+										</label>
+									</div>
+									<div class="grid grid-cols-2 gap-3">
+										<label class="grid gap-1 text-xs font-bold text-neutral-500">
+											Before
+											<input
+												aria-label="Display buffer before minutes"
+												class="h-10 rounded-md border bg-neutral-50 px-3 font-semibold text-neutral-950"
+												type="number"
+												min="0"
+												step="5"
+												bind:value={padBefore}
+											/>
+										</label>
+										<label class="grid gap-1 text-xs font-bold text-neutral-500">
+											After
+											<input
+												aria-label="Display buffer after minutes"
+												class="h-10 rounded-md border bg-neutral-50 px-3 font-semibold text-neutral-950"
+												type="number"
+												min="0"
+												step="5"
+												bind:value={padAfter}
+											/>
+										</label>
+									</div>
+								</div>
+							</Popover.Content>
+						</Popover.Portal>
+					</Popover.Root>
 				</div>
 				<div class="inline-flex overflow-hidden rounded-md border bg-neutral-100">
 					{#each ['combined', 'advertised', 'actual'] as mode (mode)}
@@ -556,7 +855,7 @@
 				</div>
 			</header>
 
-			<div class="overflow-auto">
+			<div class="overflow-auto" data-timeline-scroll bind:this={timelineScrollElement}>
 				<div
 					class="relative grid"
 					style={`width:${timelineWidth}px; min-height:${timelineHeight + 42}px; grid-template-columns:76px repeat(${lanes.length}, ${laneWidth}px);`}
@@ -602,9 +901,7 @@
 									tabindex="0"
 									class={[
 										'group absolute right-2 left-2 rounded-lg select-none',
-										canEditActiveWorkspace
-											? 'cursor-grab touch-none active:cursor-grabbing'
-											: 'cursor-default'
+										canEditActiveWorkspace ? 'touch-none' : ''
 									]}
 									class:z-20={selectedId === block.id}
 									style={`top:${blockTop(block)}px; height:${blockHeight(block)}px;`}
@@ -620,44 +917,120 @@
 										if (event.key === 'Enter' || event.key === ' ') selectedId = block.id;
 									}}
 								>
-									{#if canEditActiveWorkspace && selectedId === block.id}
-										<div class="absolute -top-9 left-2 z-30 flex h-7 items-center gap-1">
+									{#if hasAdvertisedLayer(block)}
+										<div
+											class={[
+												'pointer-events-none absolute inset-x-0 z-10 rounded-md border-2 border-dashed border-violet-600 bg-transparent transition-opacity',
+												advertisedChanged(block)
+													? 'opacity-100'
+													: 'opacity-0 group-focus-within:opacity-40 group-hover:opacity-40'
+											]}
+											style={advertisedBoxStyle(block)}
+										></div>
+										{#if advertisedChanged(block)}
+											<div
+												class="pointer-events-none absolute right-10 z-20 grid w-12 grid-rows-[auto_1fr_auto] place-items-center text-[10px] font-black text-violet-700 tabular-nums"
+												style={advertisedBoxStyle(block)}
+											>
+												<span
+													class="rounded-full bg-white/90 px-1 shadow-[0_0_0_1px_rgba(124,58,237,0.25)]"
+													>{block.advertisedStart}</span
+												>
+												<span class="relative h-full w-px bg-violet-600/45">
+													<span
+														class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 rounded-md border border-violet-300 bg-white/95 px-1.5 py-0.5 text-[10px] leading-none font-black whitespace-nowrap text-violet-700 shadow-sm shadow-violet-950/10"
+													>
+														{advertisedDurationLabel(block)}
+													</span>
+												</span>
+												<span
+													class="rounded-full bg-white/90 px-1 shadow-[0_0_0_1px_rgba(124,58,237,0.25)]"
+													>{block.advertisedEnd}</span
+												>
+											</div>
+										{/if}
+										{#if canEditActiveWorkspace && selectedId === block.id}
 											<button
 												type="button"
-												class="h-7 rounded-md border bg-white px-2 text-[10px] font-black shadow"
-												onclick={() => (block.bufferBefore = Math.max(0, block.bufferBefore - 5))}
-												>Pre -</button
+												aria-label="Resize advertised start"
+												data-no-drag
+												class="group/resize absolute inset-x-0 z-40 flex h-6 touch-none items-center justify-end rounded-md px-3 focus-visible:outline-none enabled:cursor-ns-resize disabled:cursor-default"
+												style={advertisedHandleStyle(block, 'start')}
+												disabled={!canEditActiveWorkspace}
+												use:timelineActualResizeHandle={{
+													block,
+													edge: 'start',
+													target: 'advertised',
+													laneSelector: '[data-timeline-lane]',
+													minuteHeight,
+													onSelect: (id) => (selectedId = id),
+													viewStartMinutes,
+													disabled: !canEditActiveWorkspace
+												}}
 											>
+												<span
+													class={[
+														'h-1.5 w-20 rounded-full bg-violet-600 opacity-0 shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition-opacity',
+														'group-hover/resize:opacity-100 group-focus-visible/resize:opacity-100'
+													]}
+												></span>
+											</button>
 											<button
 												type="button"
-												class="h-7 rounded-md border bg-white px-2 text-[10px] font-black shadow"
-												onclick={() => (block.bufferBefore += 5)}>Pre +</button
+												aria-label="Resize advertised end"
+												data-no-drag
+												class="group/resize absolute inset-x-0 z-40 flex h-6 touch-none items-center justify-end rounded-md px-3 focus-visible:outline-none enabled:cursor-ns-resize disabled:cursor-default"
+												style={advertisedHandleStyle(block, 'end')}
+												disabled={!canEditActiveWorkspace}
+												use:timelineActualResizeHandle={{
+													block,
+													edge: 'end',
+													target: 'advertised',
+													laneSelector: '[data-timeline-lane]',
+													minuteHeight,
+													onSelect: (id) => (selectedId = id),
+													viewStartMinutes,
+													disabled: !canEditActiveWorkspace
+												}}
 											>
-											<button
-												type="button"
-												class="h-7 rounded-md border bg-white px-2 text-[10px] font-black shadow"
-												onclick={() => (block.bufferAfter = Math.max(0, block.bufferAfter - 5))}
-												>Post -</button
-											>
-											<button
-												type="button"
-												class="h-7 rounded-md border bg-white px-2 text-[10px] font-black shadow"
-												onclick={() => (block.bufferAfter += 5)}>Post +</button
-											>
-											<button
-												type="button"
-												class="h-7 rounded-md border bg-white px-2 text-[10px] font-black shadow"
-												onclick={() => cycleType(block)}>{typeLabel(block.type)}</button
-											>
-										</div>
+												<span
+													class={[
+														'h-1.5 w-20 rounded-full bg-violet-600 opacity-0 shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition-opacity',
+														'group-hover/resize:opacity-100 group-focus-visible/resize:opacity-100'
+													]}
+												></span>
+											</button>
+										{/if}
+									{/if}
+
+									{#if canEditActiveWorkspace && selectedId === block.id && !range.advertisedOnly && range.before === 0 && viewMode !== 'advertised'}
+										<button
+											type="button"
+											aria-label="Add buffer time before"
+											title="Add buffer time"
+											data-no-drag
+											class="absolute left-1/2 z-[60] grid size-7 -translate-x-1/2 place-items-center rounded-full border border-neutral-300 bg-white text-neutral-800 opacity-0 shadow-md shadow-neutral-950/15 transition hover:border-neutral-900 hover:bg-neutral-950 hover:text-white hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-neutral-950/20 focus-visible:outline-none"
+											style={addBufferButtonStyle(block, 'before')}
+											onclick={(event) => {
+												event.stopPropagation();
+												block.bufferBefore = 10;
+											}}
+										>
+											<Plus class="size-4" />
+										</button>
 									{/if}
 
 									{#if !range.advertisedOnly && range.before > 0}
 										<div
-											class="relative flex items-center bg-[repeating-linear-gradient(135deg,rgba(92,101,110,.12)_0_5px,rgba(92,101,110,.035)_5px_10px)] px-2 pr-12 text-[10px] font-black tracking-[0.08em] text-neutral-500 uppercase opacity-70"
-											style={`height:${Math.max(12, range.before * minuteHeight)}px;`}
+											class="absolute inset-x-0 flex items-center bg-[repeating-linear-gradient(135deg,rgba(92,101,110,.12)_0_5px,rgba(92,101,110,.035)_5px_10px)] px-2 pr-14 text-[10px] font-black tracking-[0.08em] text-neutral-500 uppercase opacity-70"
+											style={bufferBeforeStyle(block)}
 										>
 											Buffer {range.before}m
+											<span
+												class="absolute top-1 right-2 rounded bg-white/75 px-1.5 py-0.5 text-[10px] leading-none font-black tracking-normal text-neutral-600 tabular-nums"
+											>
+												{bufferStartLabel(block)}
+											</span>
 											<button
 												type="button"
 												aria-label="Resize buffer before"
@@ -667,36 +1040,81 @@
 												use:timelineBufferResizeHandle={{
 													block,
 													edge: 'before',
+													laneSelector: '[data-timeline-lane]',
 													minuteHeight,
 													onSelect: (id) => (selectedId = id),
+													viewStartMinutes,
 													disabled: !canEditActiveWorkspace
 												}}
 											></button>
 										</div>
 									{/if}
 
-									<div
-										class={[
-											'relative overflow-hidden rounded-md border p-2 pr-12 shadow-lg shadow-neutral-950/10',
-											blockColors(block.type),
-											selectedId === block.id ? 'border-neutral-950 ring-4 ring-neutral-950/10' : ''
-										]}
-									>
+									{#if canEditActiveWorkspace && selectedId === block.id && viewMode !== 'advertised' && !isMilestone(block)}
 										<button
 											type="button"
 											aria-label="Resize actual start"
 											data-no-drag
-											class="absolute inset-x-8 top-0 z-10 h-3 touch-none rounded-full opacity-0 hover:bg-neutral-800/25 enabled:cursor-ns-resize group-hover:enabled:opacity-100 disabled:cursor-default"
+											class="group/resize absolute inset-x-3 z-50 flex h-6 touch-none items-center justify-center rounded-full focus-visible:outline-none enabled:cursor-ns-resize disabled:cursor-default"
+											style={actualHandleStyle(block, 'start')}
 											disabled={!canEditActiveWorkspace}
 											use:timelineActualResizeHandle={{
 												block,
 												edge: 'start',
+												laneSelector: '[data-timeline-lane]',
 												minuteHeight,
 												onSelect: (id) => (selectedId = id),
+												viewStartMinutes,
 												disabled: !canEditActiveWorkspace
 											}}
-										></button>
+										>
+											<span
+												class={[
+													'h-1.5 w-full rounded-full bg-neutral-950/85 opacity-0 shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition-opacity',
+													canEditActiveWorkspace
+														? 'group-hover/resize:opacity-100 group-focus-visible/resize:opacity-100'
+														: ''
+												]}
+											></span>
+										</button>
+										<button
+											type="button"
+											aria-label="Resize actual end"
+											data-no-drag
+											class="group/resize absolute inset-x-3 z-50 flex h-6 touch-none items-center justify-center rounded-full focus-visible:outline-none enabled:cursor-ns-resize disabled:cursor-default"
+											style={actualHandleStyle(block, 'end')}
+											disabled={!canEditActiveWorkspace}
+											use:timelineActualResizeHandle={{
+												block,
+												edge: 'end',
+												laneSelector: '[data-timeline-lane]',
+												minuteHeight,
+												onSelect: (id) => (selectedId = id),
+												viewStartMinutes,
+												disabled: !canEditActiveWorkspace
+											}}
+										>
+											<span
+												class={[
+													'h-1.5 w-full rounded-full bg-neutral-950/85 opacity-0 shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition-opacity',
+													canEditActiveWorkspace
+														? 'group-hover/resize:opacity-100 group-focus-visible/resize:opacity-100'
+														: ''
+												]}
+											></span>
+										</button>
+									{/if}
 
+									<div
+										class={[
+											'absolute inset-x-0 overflow-hidden rounded-md border p-2 pr-12 shadow-lg shadow-neutral-950/10 transition-[border-color,box-shadow,filter]',
+											blockColors(block.type),
+											selectedId === block.id
+												? 'border-neutral-700 shadow-neutral-950/20 brightness-95'
+												: ''
+										]}
+										style={actualCardStyle(block)}
+									>
 										<div
 											class="grid grid-cols-[20px_minmax(0,1fr)] items-start gap-2 text-left text-sm leading-tight font-black"
 										>
@@ -761,68 +1179,66 @@
 										</div>
 
 										<div
-											data-block-drag-surface
-											class="mt-2 flex flex-wrap gap-1 text-[10px] font-black tracking-[0.05em] text-neutral-500 uppercase"
+											class={[
+												'mt-2 flex flex-wrap gap-1 text-[10px] font-black tracking-[0.05em] text-neutral-500 uppercase'
+											]}
 										>
-											<span class="rounded-full border bg-white/70 px-2 py-0.5"
-												>{typeLabel(block.type)}</span
-											>
+											{#if canEditActiveWorkspace && selectedId === block.id}
+												<button
+													type="button"
+													data-no-drag
+													class="rounded-full border bg-white/90 px-2 py-0.5 text-[10px] font-black tracking-[0.05em] text-neutral-700 uppercase hover:border-neutral-900 hover:text-neutral-950 focus-visible:ring-2 focus-visible:ring-neutral-950/20 focus-visible:outline-none"
+													onclick={(event) => {
+														event.stopPropagation();
+														cycleType(block);
+													}}
+												>
+													{typeLabel(block.type)}
+												</button>
+											{:else}
+												<span class="rounded-full border bg-white/70 px-2 py-0.5"
+													>{typeLabel(block.type)}</span
+												>
+											{/if}
 											<span class="rounded-full border bg-white/70 px-2 py-0.5"
 												>{block.visibility}</span
 											>
 											<span class="rounded-full border bg-white/70 px-2 py-0.5"
-												>{viewMode === 'advertised'
-													? `${block.advertisedStart}-${block.advertisedEnd}`
-													: `${block.start}-${block.end}`}</span
+												>{displayedTimeLabel(block)}</span
 											>
 										</div>
-										<p
-											data-block-drag-surface
-											class="mt-2 line-clamp-2 text-xs leading-5 text-neutral-700"
-										>
+										<p class={['mt-2 line-clamp-2 text-xs leading-5 text-neutral-700']}>
 											{block.notes}
 										</p>
 
 										<div
-											data-block-drag-surface
-											class="pointer-events-none absolute top-2 right-2 bottom-2 grid w-9 grid-rows-[auto_1fr_auto] place-items-center text-[10px] font-black text-neutral-700 tabular-nums"
+											class="pointer-events-none absolute top-2 right-2 bottom-2 grid w-12 grid-rows-[auto_1fr_auto] place-items-center text-[10px] font-black text-neutral-700 tabular-nums"
 										>
-											<span>{viewMode === 'advertised' ? block.advertisedStart : block.start}</span>
+											<span>{displayedStart(block)}</span>
 											<span class="relative h-full w-px bg-neutral-950/25">
-												<span
-													class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border bg-white/90 px-1 text-neutral-500"
-												>
-													{durationLabel(
-														viewMode === 'advertised' ? block.advertisedStart : block.start,
-														viewMode === 'advertised' ? block.advertisedEnd : block.end
-													)}
-												</span>
+												{#if !isMilestone(block)}
+													<span
+														class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 rounded-md border border-neutral-300 bg-white/95 px-1.5 py-0.5 text-[10px] leading-none font-black whitespace-nowrap text-neutral-600 shadow-sm shadow-neutral-950/10"
+													>
+														{durationLabel(displayedStart(block), displayedEnd(block))}
+													</span>
+												{/if}
 											</span>
-											<span>{viewMode === 'advertised' ? block.advertisedEnd : block.end}</span>
+											<span>{isMilestone(block) ? '' : displayedEnd(block)}</span>
 										</div>
-
-										<button
-											type="button"
-											aria-label="Resize actual end"
-											data-no-drag
-											class="absolute inset-x-8 bottom-0 z-10 h-3 touch-none rounded-full opacity-0 hover:bg-neutral-800/25 enabled:cursor-ns-resize group-hover:enabled:opacity-100 disabled:cursor-default"
-											disabled={!canEditActiveWorkspace}
-											use:timelineActualResizeHandle={{
-												block,
-												edge: 'end',
-												minuteHeight,
-												onSelect: (id) => (selectedId = id),
-												disabled: !canEditActiveWorkspace
-											}}
-										></button>
 									</div>
 
 									{#if !range.advertisedOnly && range.after > 0}
 										<div
-											class="relative flex items-center bg-[repeating-linear-gradient(135deg,rgba(92,101,110,.12)_0_5px,rgba(92,101,110,.035)_5px_10px)] px-2 pr-12 text-[10px] font-black tracking-[0.08em] text-neutral-500 uppercase opacity-70"
-											style={`height:${Math.max(12, range.after * minuteHeight)}px;`}
+											class="absolute inset-x-0 flex items-center bg-[repeating-linear-gradient(135deg,rgba(92,101,110,.12)_0_5px,rgba(92,101,110,.035)_5px_10px)] px-2 pr-14 text-[10px] font-black tracking-[0.08em] text-neutral-500 uppercase opacity-70"
+											style={bufferAfterStyle(block)}
 										>
 											{range.after}m Buffer
+											<span
+												class="absolute right-2 bottom-1 rounded bg-white/75 px-1.5 py-0.5 text-[10px] leading-none font-black tracking-normal text-neutral-600 tabular-nums"
+											>
+												{bufferEndLabel(block)}
+											</span>
 											<button
 												type="button"
 												aria-label="Resize buffer after"
@@ -832,12 +1248,30 @@
 												use:timelineBufferResizeHandle={{
 													block,
 													edge: 'after',
+													laneSelector: '[data-timeline-lane]',
 													minuteHeight,
 													onSelect: (id) => (selectedId = id),
+													viewStartMinutes,
 													disabled: !canEditActiveWorkspace
 												}}
 											></button>
 										</div>
+									{/if}
+									{#if canEditActiveWorkspace && selectedId === block.id && !range.advertisedOnly && range.after === 0 && viewMode !== 'advertised'}
+										<button
+											type="button"
+											aria-label="Add buffer time after"
+											title="Add buffer time"
+											data-no-drag
+											class="absolute left-1/2 z-[60] grid size-7 -translate-x-1/2 place-items-center rounded-full border border-neutral-300 bg-white text-neutral-800 opacity-0 shadow-md shadow-neutral-950/15 transition hover:border-neutral-900 hover:bg-neutral-950 hover:text-white hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-neutral-950/20 focus-visible:outline-none"
+											style={addBufferButtonStyle(block, 'after')}
+											onclick={(event) => {
+												event.stopPropagation();
+												block.bufferAfter = 10;
+											}}
+										>
+											<Plus class="size-4" />
+										</button>
 									{/if}
 								</div>
 							{/each}
@@ -964,52 +1398,62 @@
 							<select
 								aria-label="Selected block type"
 								class="h-9 rounded-md border bg-neutral-50 px-2 font-semibold text-neutral-950"
-								bind:value={selectedBlock.type}
+								value={selectedBlock.type}
 								disabled={!canEditActiveWorkspace}
+								onchange={(event) =>
+									setBlockType(
+										selectedBlock,
+										(event.currentTarget as HTMLSelectElement).value as TimelineBlockType
+									)}
 							>
+								<option value="scheduled">Scheduled</option>
 								<option value="planning">Planning</option>
-								<option value="active">Active</option>
-								<option value="side">Side task</option>
+								<option value="milestone">Milestone</option>
 							</select>
 						</label>
 					</div>
 					<div class="grid grid-cols-2 gap-2">
 						<label class="grid gap-1 text-xs font-bold text-neutral-500"
-							>Actual start<input
+							>{isMilestone(selectedBlock) ? 'Time' : 'Actual start'}<input
 								aria-label="Selected block actual start"
 								class="h-9 rounded-md border bg-neutral-50 px-3 font-semibold text-neutral-950"
 								type="time"
 								bind:value={selectedBlock.start}
 								readonly={!canEditActiveWorkspace}
+								onchange={() => syncMilestoneTime(selectedBlock)}
 							/></label
 						>
-						<label class="grid gap-1 text-xs font-bold text-neutral-500"
-							>Actual end<input
-								aria-label="Selected block actual end"
-								class="h-9 rounded-md border bg-neutral-50 px-3 font-semibold text-neutral-950"
-								type="time"
-								bind:value={selectedBlock.end}
-								readonly={!canEditActiveWorkspace}
-							/></label
-						>
-						<label class="grid gap-1 text-xs font-bold text-neutral-500"
-							>Advertised start<input
-								aria-label="Selected block advertised start"
-								class="h-9 rounded-md border bg-neutral-50 px-3 font-semibold text-neutral-950"
-								type="time"
-								bind:value={selectedBlock.advertisedStart}
-								readonly={!canEditActiveWorkspace}
-							/></label
-						>
-						<label class="grid gap-1 text-xs font-bold text-neutral-500"
-							>Advertised end<input
-								aria-label="Selected block advertised end"
-								class="h-9 rounded-md border bg-neutral-50 px-3 font-semibold text-neutral-950"
-								type="time"
-								bind:value={selectedBlock.advertisedEnd}
-								readonly={!canEditActiveWorkspace}
-							/></label
-						>
+						{#if !isMilestone(selectedBlock)}
+							<label class="grid gap-1 text-xs font-bold text-neutral-500"
+								>Actual end<input
+									aria-label="Selected block actual end"
+									class="h-9 rounded-md border bg-neutral-50 px-3 font-semibold text-neutral-950"
+									type="time"
+									bind:value={selectedBlock.end}
+									readonly={!canEditActiveWorkspace}
+								/></label
+							>
+						{/if}
+						{#if hasAdvertisedLayer(selectedBlock)}
+							<label class="grid gap-1 text-xs font-bold text-neutral-500"
+								>Advertised start<input
+									aria-label="Selected block advertised start"
+									class="h-9 rounded-md border bg-neutral-50 px-3 font-semibold text-neutral-950"
+									type="time"
+									bind:value={selectedBlock.advertisedStart}
+									readonly={!canEditActiveWorkspace}
+								/></label
+							>
+							<label class="grid gap-1 text-xs font-bold text-neutral-500"
+								>Advertised end<input
+									aria-label="Selected block advertised end"
+									class="h-9 rounded-md border bg-neutral-50 px-3 font-semibold text-neutral-950"
+									type="time"
+									bind:value={selectedBlock.advertisedEnd}
+									readonly={!canEditActiveWorkspace}
+								/></label
+							>
+						{/if}
 						<label class="grid gap-1 text-xs font-bold text-neutral-500"
 							>Buffer before<input
 								aria-label="Selected block buffer before minutes"

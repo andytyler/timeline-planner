@@ -1,4 +1,4 @@
-export type TimelineBlockType = 'planning' | 'active' | 'side';
+export type TimelineBlockType = 'scheduled' | 'planning' | 'milestone' | 'active' | 'side';
 export type TimelineVisibility = 'internal' | 'external';
 
 export type TimelineLane = {
@@ -47,7 +47,7 @@ export const timelineBlocks: TimelineBlock[] = [
 		title: 'Doors open and badge scan',
 		icon: 'play',
 		lane: 'main',
-		type: 'active',
+		type: 'scheduled',
 		visibility: 'external',
 		start: '09:30',
 		end: '10:15',
@@ -79,7 +79,7 @@ export const timelineBlocks: TimelineBlock[] = [
 		title: 'Demo block A',
 		icon: 'play',
 		lane: 'main',
-		type: 'active',
+		type: 'scheduled',
 		visibility: 'internal',
 		start: '10:45',
 		end: '11:35',
@@ -127,7 +127,7 @@ export const timelineBlocks: TimelineBlock[] = [
 		title: 'Public break',
 		icon: 'clock',
 		lane: 'external',
-		type: 'planning',
+		type: 'scheduled',
 		visibility: 'external',
 		start: '11:45',
 		end: '12:20',
@@ -143,7 +143,7 @@ export const timelineBlocks: TimelineBlock[] = [
 		title: 'Panel and Q&A',
 		icon: 'mic',
 		lane: 'main',
-		type: 'active',
+		type: 'scheduled',
 		visibility: 'external',
 		start: '13:10',
 		end: '14:15',
