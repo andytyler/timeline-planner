@@ -1,3 +1,4 @@
+import { authCallbackUrl } from '$lib/server/origin';
 import { safeRedirectPath } from '$lib/server/redirect';
 import { fail, redirect } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
@@ -42,14 +43,11 @@ export const actions: Actions = {
 		}
 
 		if (mode === 'signup') {
-			const redirectTo = new URL('/auth/callback', url.origin);
-			redirectTo.searchParams.set('next', next);
-
 			const { data, error } = await locals.supabase.auth.signUp({
 				email,
 				password,
 				options: {
-					emailRedirectTo: redirectTo.toString()
+					emailRedirectTo: authCallbackUrl(url.origin, next)
 				}
 			});
 
@@ -91,13 +89,11 @@ export const actions: Actions = {
 
 		const form = await request.formData();
 		const next = safeRedirectPath(form.get('next'));
-		const redirectTo = new URL('/auth/callback', url.origin);
-		redirectTo.searchParams.set('next', next);
 
 		const { data, error } = await locals.supabase.auth.signInWithOAuth({
 			provider: 'google',
 			options: {
-				redirectTo: redirectTo.toString()
+				redirectTo: authCallbackUrl(url.origin, next)
 			}
 		});
 

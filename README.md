@@ -27,10 +27,12 @@ A standalone SvelteKit app for planning event run-of-show timelines with Supabas
 PUBLIC_SUPABASE_URL=
 PUBLIC_SUPABASE_PUBLISHABLE_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
+APP_ORIGIN=
 ```
 
 - `PUBLIC_SUPABASE_URL` and `PUBLIC_SUPABASE_PUBLISHABLE_KEY` enable login, workspaces, members, invitations, and timeline persistence.
 - `SUPABASE_SERVICE_ROLE_KEY` is server-only. It lets the SvelteKit server read private workspace Luma credentials during sync.
+- `APP_ORIGIN` should be the canonical deployed origin, for example `https://tline.ajt.dev`. It keeps Supabase OAuth and email confirmation links off localhost in production.
 - Luma API keys are entered per workspace in the app and stored in `app_private.workspace_luma_credentials`; they are never returned to browser page data.
 - Keep real keys in `.env.local` or the Railway service environment, not in committed files.
 - Supabase Google OAuth must allow the production callback URL: `https://<railway-domain>/auth/callback`.
@@ -43,7 +45,7 @@ SUPABASE_SERVICE_ROLE_KEY=
 4. Add local and production callback URLs:
    - `http://localhost:5174/auth/callback`
    - `https://<railway-domain>/auth/callback`
-5. Set `PUBLIC_SUPABASE_URL` and `PUBLIC_SUPABASE_PUBLISHABLE_KEY` locally and in Railway.
+5. Set `PUBLIC_SUPABASE_URL`, `PUBLIC_SUPABASE_PUBLISHABLE_KEY`, and `APP_ORIGIN` locally and in Railway.
 
 The migration creates:
 
@@ -76,7 +78,7 @@ Create a Railway service rooted at this directory. The checked-in `railway.toml`
 - start: `bun run start`
 - healthcheck: `/health`
 
-Set `PUBLIC_SUPABASE_URL`, `PUBLIC_SUPABASE_PUBLISHABLE_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` in Railway. The service-role key must stay private and server-side only.
+Set `PUBLIC_SUPABASE_URL`, `PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and `APP_ORIGIN=https://tline.ajt.dev` in Railway. The service-role key must stay private and server-side only.
 
 After deploy, open `/health` on the Railway domain. A production Supabase-backed service should report:
 

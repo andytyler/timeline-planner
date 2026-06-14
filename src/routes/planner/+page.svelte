@@ -56,10 +56,6 @@
 		data.workspaces.find((workspace) => workspace.id === data.activeWorkspaceId) ??
 			data.workspaces[0]
 	);
-	const canManageActiveWorkspace = $derived(
-		data.activeWorkspaceRole === 'owner' || data.activeWorkspaceRole === 'admin'
-	);
-	const canUseWorkspaceLuma = $derived(data.mode !== 'local' && Boolean(activeWorkspace));
 	const canEditActiveWorkspace = $derived(
 		data.mode === 'local' ||
 			data.activeWorkspaceRole === 'owner' ||
@@ -100,10 +96,6 @@
 		const query = search.toString();
 		return query ? `/planner?${query}` : '/planner';
 	}
-
-	const currentPlannerHref = $derived(
-		plannerHref({ timeline: data.activeTimeline?.id ?? undefined })
-	);
 
 	function formMessage(intent: string) {
 		return form?.intent === intent ? form.message : null;
@@ -246,29 +238,6 @@
 
 	function pickerKey(surface: 'card' | 'panel', blockId: string) {
 		return `${surface}:${blockId}`;
-	}
-
-	function memberLabel(member: PageData['members'][number]) {
-		return member.profile?.full_name || member.profile?.email || member.user_id.slice(0, 8);
-	}
-
-	function memberSecondary(member: PageData['members'][number]) {
-		if (member.profile?.full_name && member.profile.email) return member.profile.email;
-		return member.user_id.slice(0, 8);
-	}
-
-	function canManageMember(member: PageData['members'][number]) {
-		if (!canManageActiveWorkspace) return false;
-		if (member.role === 'owner') return false;
-		if (member.user_id === data.currentUserId) return false;
-		if (data.activeWorkspaceRole === 'admin' && member.role === 'admin') return false;
-		return true;
-	}
-
-	function memberRoleChoices() {
-		return data.activeWorkspaceRole === 'owner'
-			? ['admin', 'member', 'viewer']
-			: ['member', 'viewer'];
 	}
 
 	function iconComponent(icon: string) {
@@ -492,349 +461,23 @@
 					<p>Supabase is not configured, so edits stay in the browser prototype state.</p>
 				{:else if activeWorkspace}
 					<div class="mb-2 font-black text-neutral-950">{activeWorkspace.name}</div>
-					<div class="mb-3 grid grid-cols-[34px_minmax(0,1fr)] items-center gap-2">
-						{#if data.currentProfile?.avatar_url}
-							<img
-								class="size-8 rounded-md border object-cover"
-								src={data.currentProfile.avatar_url}
-								alt=""
-							/>
-						{:else}
-							<div
-								class="grid size-8 place-items-center rounded-md border bg-white text-[11px] font-black text-neutral-500"
-							>
-								{(data.currentProfile?.full_name || data.userEmail || '?')
-									.slice(0, 1)
-									.toUpperCase()}
-							</div>
-						{/if}
-						<div class="min-w-0">
-							<p class="truncate font-black text-neutral-950">
-								{data.currentProfile?.full_name || data.userEmail}
-							</p>
-							<p class="truncate text-[10px] font-bold text-neutral-500">
-								{data.currentProfile?.email || data.userEmail}
-							</p>
-						</div>
-					</div>
-					<form class="mb-3 grid gap-2 border-b pb-3" method="POST" action="?/updateProfile">
-						<input type="hidden" name="returnTo" value={currentPlannerHref} />
-						<label class="grid gap-1 font-bold text-neutral-500">
-							Display name
-							<input
-								class="h-8 rounded-md border bg-white px-2 font-semibold text-neutral-950"
-								name="fullName"
-								value={data.currentProfile?.full_name ?? ''}
-								maxlength="120"
-								placeholder="Your name"
-							/>
-						</label>
-						<label class="grid gap-1 font-bold text-neutral-500">
-							Avatar URL
-							<input
-								class="h-8 rounded-md border bg-white px-2 font-semibold text-neutral-950"
-								name="avatarUrl"
-								value={data.currentProfile?.avatar_url ?? ''}
-								maxlength="500"
-								placeholder="https://..."
-							/>
-						</label>
-						<button
-							class="h-8 rounded-md border bg-white text-xs font-black text-neutral-700"
-							type="submit"
-						>
-							Save profile
-						</button>
-						{#if formMessage('profile')}
-							<p
-								class="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[11px] font-bold text-red-700"
-							>
-								{formMessage('profile')}
-							</p>
-						{/if}
-					</form>
-					<p>{data.members.length} members / {data.invitations.length} invites</p>
 					<p>{data.lumaEvents.length} Luma events / {data.timelines.length} timelines</p>
-					{#if data.myInvitations.length > 0}
-						<div class="mt-2 grid gap-1 border-t pt-2">
-							{#if formMessage('invitation')}
-								<p
-									class="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[11px] font-bold text-red-700"
-								>
-									{formMessage('invitation')}
-								</p>
-							{/if}
-							{#each data.myInvitations as invite (invite.id)}
-								<form class="grid gap-1" method="POST" action="?/acceptInvitation">
-									<input type="hidden" name="invitationId" value={invite.id} />
-									<div class="text-[11px] font-bold text-neutral-500">Invited as {invite.role}</div>
-									<button
-										class="h-7 rounded-md bg-neutral-950 px-2 text-[11px] font-black text-white"
-										type="submit"
-									>
-										Accept invite
-									</button>
-								</form>
-							{/each}
-						</div>
-					{/if}
-					{#if canUseWorkspaceLuma && activeWorkspace}
-						<form class="mt-2 grid gap-1 border-t pt-2" method="POST" action="?/updateLumaSource">
-							<input type="hidden" name="workspaceId" value={activeWorkspace.id} />
-							<label class="grid gap-1 font-bold text-neutral-500">
-								Luma calendar API ID
-								<input
-									class="h-8 rounded-md border bg-white px-2 font-semibold text-neutral-950"
-									name="calendarApiId"
-									value={data.activeWorkspaceLumaCalendarApiId ?? ''}
-									maxlength="120"
-									placeholder="cal-..."
-								/>
-							</label>
-							<label class="grid gap-1 font-bold text-neutral-500">
-								Luma API key
-								<input
-									class="h-8 rounded-md border bg-white px-2 font-semibold text-neutral-950"
-									name="lumaApiKey"
-									type="password"
-									autocomplete="off"
-									maxlength="500"
-									placeholder={data.activeWorkspaceLumaApiKeyConfigured
-										? 'Saved - enter a new key to replace'
-										: 'Paste workspace Luma API key'}
-								/>
-							</label>
-							<p class="text-[10px] leading-4 font-bold text-neutral-500">
-								{data.activeWorkspaceLumaApiKeyConfigured
-									? 'A Luma API key is saved for this workspace.'
-									: 'No Luma API key is saved for this workspace yet.'}
-							</p>
-							<button
-								class="h-7 rounded-md border bg-white px-2 text-[11px] font-black text-neutral-700"
-								type="submit"
-							>
-								Save Luma settings
-							</button>
-						</form>
-						<form class="mt-2" method="POST" action="?/syncLumaEvents">
-							<input type="hidden" name="workspaceId" value={activeWorkspace.id} />
-							<button
-								class="inline-flex h-7 items-center rounded-md border bg-white px-2 font-bold text-neutral-700"
-								type="submit"
-							>
-								Sync Luma
-							</button>
-						</form>
-					{/if}
-					{#if formMessage('luma')}
-						<p
-							class="mt-2 rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[11px] font-bold text-red-700"
-						>
-							{formMessage('luma')}
-						</p>
-					{/if}
-					{#if data.timelines.length > 0}
-						<div class="mt-2 grid gap-1">
-							{#each data.timelines as timeline (timeline.id)}
-								<a
-									class="truncate rounded-md px-2 py-1 font-bold text-neutral-700 hover:bg-white"
-									href={plannerHref({ timeline: timeline.id })}
-								>
-									{timeline.title}
-								</a>
-							{/each}
-						</div>
-					{/if}
 					<a
-						class="mt-2 inline-flex h-7 items-center rounded-md border bg-white px-2 font-bold text-neutral-700"
-						href="/logout">Sign out</a
+						class="mt-3 inline-flex h-8 w-full items-center justify-center rounded-md border bg-white px-2 font-black text-neutral-700"
+						href={`/settings?workspace=${activeWorkspace.id}`}
 					>
+						Workspace settings
+					</a>
 				{:else}
-					{#if data.myInvitations.length > 0}
-						<div class="mb-3 grid gap-2">
-							{#if formMessage('invitation')}
-								<p
-									class="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[11px] font-bold text-red-700"
-								>
-									{formMessage('invitation')}
-								</p>
-							{/if}
-							{#each data.myInvitations as invite (invite.id)}
-								<form
-									class="grid gap-1 rounded-md border bg-white p-2"
-									method="POST"
-									action="?/acceptInvitation"
-								>
-									<input type="hidden" name="invitationId" value={invite.id} />
-									<div class="font-black text-neutral-950">Workspace invite</div>
-									<div class="text-[11px] font-bold text-neutral-500">Invited as {invite.role}</div>
-									<button
-										class="h-7 rounded-md bg-neutral-950 px-2 text-[11px] font-black text-white"
-										type="submit"
-									>
-										Accept invite
-									</button>
-								</form>
-							{/each}
-						</div>
-					{/if}
-					<form class="grid gap-2" method="POST" action="?/createWorkspace">
-						<label class="grid gap-1 font-bold text-neutral-500">
-							Workspace
-							<input
-								class="h-9 rounded-md border bg-white px-3 font-semibold text-neutral-950"
-								name="name"
-								value="Event Operations"
-							/>
-						</label>
-						<button
-							class="h-8 rounded-md bg-neutral-950 text-xs font-black text-white"
-							type="submit">Create workspace</button
-						>
-						{#if formMessage('workspace')}
-							<p
-								class="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[11px] font-bold text-red-700"
-							>
-								{formMessage('workspace')}
-							</p>
-						{/if}
-					</form>
+					<div class="mb-2 font-black text-neutral-950">Workspace setup</div>
+					<a
+						class="inline-flex h-8 w-full items-center justify-center rounded-md border bg-white px-2 font-black text-neutral-700"
+						href="/settings"
+					>
+						Create or accept workspace
+					</a>
 				{/if}
 			</div>
-
-			{#if data.mode === 'supabase' && activeWorkspace}
-				<p class="mt-5 mb-2 text-[11px] font-black tracking-[0.12em] text-neutral-500 uppercase">
-					Workspace
-				</p>
-				<div class="rounded-lg border bg-neutral-50 p-3 text-xs leading-5 text-neutral-600">
-					{#if canManageActiveWorkspace}
-						<form class="grid gap-2" method="POST" action="?/inviteMember">
-							<input type="hidden" name="workspaceId" value={activeWorkspace.id} />
-							<label class="grid gap-1 font-bold text-neutral-500">
-								Invite email
-								<input
-									class="h-8 rounded-md border bg-white px-2 font-semibold text-neutral-950"
-									name="email"
-									type="email"
-									placeholder="person@example.com"
-								/>
-							</label>
-							<div class="grid grid-cols-[1fr_auto] gap-2">
-								<select
-									class="h-8 rounded-md border bg-white px-2 font-semibold text-neutral-950"
-									name="role"
-								>
-									<option value="member">Member</option>
-									<option value="viewer">Viewer</option>
-									<option value="admin">Admin</option>
-								</select>
-								<button
-									class="h-8 rounded-md bg-neutral-950 px-3 font-black text-white"
-									type="submit"
-								>
-									Invite
-								</button>
-							</div>
-							{#if formMessage('invite')}
-								<p
-									class="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[11px] font-bold text-red-700"
-								>
-									{formMessage('invite')}
-								</p>
-							{/if}
-						</form>
-					{/if}
-
-					{#if data.members.length > 0}
-						<div class="mt-3 grid gap-2 border-t pt-2">
-							{#if formMessage('member')}
-								<p
-									class="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[11px] font-bold text-red-700"
-								>
-									{formMessage('member')}
-								</p>
-							{/if}
-							{#each data.members as member (member.user_id)}
-								<div class="grid gap-2 rounded-md border bg-white p-2">
-									<div class="min-w-0">
-										<div class="truncate font-bold text-neutral-700">{memberLabel(member)}</div>
-										<div class="truncate text-[10px] font-bold text-neutral-500">
-											{memberSecondary(member)}
-										</div>
-									</div>
-									{#if canManageMember(member)}
-										<div class="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
-											<form
-												class="grid grid-cols-[minmax(0,1fr)_auto] gap-2"
-												method="POST"
-												action="?/updateMemberRole"
-											>
-												<input type="hidden" name="workspaceId" value={activeWorkspace.id} />
-												<input type="hidden" name="userId" value={member.user_id} />
-												<select
-													class="h-7 rounded-md border bg-neutral-50 px-2 text-[11px] font-bold text-neutral-700"
-													name="role"
-												>
-													{#each memberRoleChoices() as role (role)}
-														<option value={role} selected={member.role === role}>{role}</option>
-													{/each}
-												</select>
-												<button
-													class="h-7 rounded-md border bg-neutral-50 px-2 text-[10px] font-black text-neutral-600"
-													type="submit"
-												>
-													Update
-												</button>
-											</form>
-											<form method="POST" action="?/removeMember">
-												<input type="hidden" name="workspaceId" value={activeWorkspace.id} />
-												<input type="hidden" name="userId" value={member.user_id} />
-												<button
-													class="h-7 rounded-md border border-red-200 bg-red-50 px-2 text-[10px] font-black text-red-700"
-													type="submit"
-												>
-													Remove
-												</button>
-											</form>
-										</div>
-									{:else}
-										<div>
-											<span
-												class="rounded-full border bg-neutral-50 px-2 py-0.5 text-[10px] font-black text-neutral-500 uppercase"
-												>{member.role}</span
-											>
-										</div>
-									{/if}
-								</div>
-							{/each}
-						</div>
-					{/if}
-
-					{#if canManageActiveWorkspace && data.invitations.length > 0}
-						<div class="mt-3 grid gap-2 border-t pt-2">
-							{#each data.invitations as invite (invite.id)}
-								<div class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
-									<div class="min-w-0">
-										<div class="truncate font-bold text-neutral-700">{invite.email}</div>
-										<div class="text-[10px] font-black text-neutral-500 uppercase">
-											{invite.role} pending
-										</div>
-									</div>
-									<form method="POST" action="?/revokeInvitation">
-										<input type="hidden" name="invitationId" value={invite.id} />
-										<button
-											class="h-7 rounded-md border bg-white px-2 text-[10px] font-black text-neutral-500"
-											type="submit"
-										>
-											Revoke
-										</button>
-									</form>
-								</div>
-							{/each}
-						</div>
-					{/if}
-				</div>
-			{/if}
 
 			{#if data.mode !== 'local' && activeWorkspace && data.lumaEvents.length > 0}
 				<p class="mt-5 mb-2 text-[11px] font-black tracking-[0.12em] text-neutral-500 uppercase">
@@ -957,14 +600,18 @@
 								<div
 									role="button"
 									tabindex="0"
-									class="group absolute right-2 left-2 cursor-grab rounded-lg select-none"
+									class={[
+										'group absolute right-2 left-2 rounded-lg select-none',
+										canEditActiveWorkspace
+											? 'cursor-grab touch-none active:cursor-grabbing'
+											: 'cursor-default'
+									]}
 									class:z-20={selectedId === block.id}
 									style={`top:${blockTop(block)}px; height:${blockHeight(block)}px;`}
 									use:timelineBlockDrag={{
 										block,
 										laneSelector: '[data-timeline-lane]',
 										minuteHeight,
-										viewStartMinutes,
 										onSelect: (id) => (selectedId = id),
 										disabled: !canEditActiveWorkspace
 									}}
@@ -1015,7 +662,8 @@
 												type="button"
 												aria-label="Resize buffer before"
 												data-no-drag
-												class="absolute inset-x-12 -top-1 h-2 cursor-ns-resize rounded-full opacity-0 group-hover:opacity-100 hover:bg-neutral-500/30"
+												class="absolute inset-x-12 -top-1 h-2 touch-none rounded-full opacity-0 hover:bg-neutral-500/30 enabled:cursor-ns-resize group-hover:enabled:opacity-100 disabled:cursor-default"
+												disabled={!canEditActiveWorkspace}
 												use:timelineBufferResizeHandle={{
 													block,
 													edge: 'before',
@@ -1038,7 +686,8 @@
 											type="button"
 											aria-label="Resize actual start"
 											data-no-drag
-											class="absolute inset-x-8 top-0 z-10 h-3 cursor-ns-resize rounded-full opacity-0 group-hover:opacity-100 hover:bg-neutral-800/25"
+											class="absolute inset-x-8 top-0 z-10 h-3 touch-none rounded-full opacity-0 hover:bg-neutral-800/25 enabled:cursor-ns-resize group-hover:enabled:opacity-100 disabled:cursor-default"
+											disabled={!canEditActiveWorkspace}
 											use:timelineActualResizeHandle={{
 												block,
 												edge: 'start',
@@ -1156,7 +805,8 @@
 											type="button"
 											aria-label="Resize actual end"
 											data-no-drag
-											class="absolute inset-x-8 bottom-0 z-10 h-3 cursor-ns-resize rounded-full opacity-0 group-hover:opacity-100 hover:bg-neutral-800/25"
+											class="absolute inset-x-8 bottom-0 z-10 h-3 touch-none rounded-full opacity-0 hover:bg-neutral-800/25 enabled:cursor-ns-resize group-hover:enabled:opacity-100 disabled:cursor-default"
+											disabled={!canEditActiveWorkspace}
 											use:timelineActualResizeHandle={{
 												block,
 												edge: 'end',
@@ -1177,7 +827,8 @@
 												type="button"
 												aria-label="Resize buffer after"
 												data-no-drag
-												class="absolute inset-x-12 -bottom-1 h-2 cursor-ns-resize rounded-full opacity-0 group-hover:opacity-100 hover:bg-neutral-500/30"
+												class="absolute inset-x-12 -bottom-1 h-2 touch-none rounded-full opacity-0 hover:bg-neutral-500/30 enabled:cursor-ns-resize group-hover:enabled:opacity-100 disabled:cursor-default"
+												disabled={!canEditActiveWorkspace}
 												use:timelineBufferResizeHandle={{
 													block,
 													edge: 'after',

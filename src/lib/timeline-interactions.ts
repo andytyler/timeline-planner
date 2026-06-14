@@ -6,7 +6,6 @@ export type TimelineBlockDragParams = {
 	block: TimelineBlock;
 	laneSelector: string;
 	minuteHeight: number;
-	viewStartMinutes: number;
 	onSelect: (id: string) => void;
 	disabled?: boolean;
 };
@@ -31,6 +30,10 @@ function roundedMinutes(deltaPixels: number, minuteHeight: number) {
 	return Math.round(deltaPixels / minuteHeight / 5) * 5;
 }
 
+function clamp(value: number, min: number, max: number) {
+	return Math.min(max, Math.max(min, value));
+}
+
 function eventClientPoint(event: {
 	clientX?: number;
 	clientY?: number;
@@ -50,48 +53,63 @@ export function timelineBlockDrag(node: HTMLElement, params: TimelineBlockDragPa
 	let current = params;
 	let interactable: ReturnType<InteractModule['default']> | null = null;
 	let cancelled = false;
+	let originStart = 0;
+	let originEnd = 0;
+	let originAdvertisedStart = 0;
+	let originAdvertisedEnd = 0;
+	let totalPixels = 0;
+
+	function updateBlockFromDrag(event: {
+		dy?: number;
+		clientX?: number;
+		clientY?: number;
+		client?: { x?: number; y?: number };
+	}) {
+		totalPixels += event.dy ?? 0;
+
+		const duration = originEnd - originStart;
+		const delta = roundedMinutes(totalPixels, current.minuteHeight);
+		const nextStart = clamp(originStart + delta, 0, 23 * 60 + 59 - duration);
+		const appliedDelta = nextStart - originStart;
+		const point = eventClientPoint(event);
+		const lane = document
+			.elementFromPoint(point.x, point.y)
+			?.closest<HTMLElement>(current.laneSelector);
+		const laneId = lane?.dataset.timelineLane;
+
+		if (laneId) current.block.lane = laneId;
+		current.block.start = minutesToTime(nextStart);
+		current.block.end = minutesToTime(originEnd + appliedDelta);
+		current.block.advertisedStart = minutesToTime(originAdvertisedStart + appliedDelta);
+		current.block.advertisedEnd = minutesToTime(originAdvertisedEnd + appliedDelta);
+	}
 
 	async function setup() {
 		const { default: interact } = await import('interactjs');
 		if (cancelled) return;
 
 		interactable = interact(node).draggable({
+			enabled: !current.disabled,
 			allowFrom: '[data-block-drag-surface]',
 			ignoreFrom: 'button,input,textarea,select,a,[data-no-drag]',
 			listeners: {
 				start() {
 					if (current.disabled) return;
+					originStart = timeToMinutes(current.block.start);
+					originEnd = timeToMinutes(current.block.end);
+					originAdvertisedStart = timeToMinutes(current.block.advertisedStart);
+					originAdvertisedEnd = timeToMinutes(current.block.advertisedEnd);
+					totalPixels = 0;
 					current.onSelect(current.block.id);
 					setDraggingClass(node, true);
 				},
-				end(event) {
-					setDraggingClass(node, false);
+				move(event) {
 					if (current.disabled) return;
-					const point = eventClientPoint(event);
-					const lane = document
-						.elementFromPoint(point.x, point.y)
-						?.closest<HTMLElement>(current.laneSelector);
-
-					if (!lane) return;
-
-					const laneId = lane.dataset.timelineLane;
-					if (!laneId) return;
-
-					const rect = lane.getBoundingClientRect();
-					const duration = timeToMinutes(current.block.end) - timeToMinutes(current.block.start);
-					const nextStart =
-						current.viewStartMinutes + roundedMinutes(point.y - rect.top, current.minuteHeight);
-					const nextEnd = nextStart + duration;
-					const advertisedDuration =
-						timeToMinutes(current.block.advertisedEnd) -
-						timeToMinutes(current.block.advertisedStart);
-
-					current.block.lane = laneId;
-					current.block.start = minutesToTime(nextStart);
-					current.block.end = minutesToTime(nextEnd);
-					current.block.advertisedStart = minutesToTime(nextStart);
-					current.block.advertisedEnd = minutesToTime(nextStart + advertisedDuration);
+					updateBlockFromDrag(event);
 					current.onSelect(current.block.id);
+				},
+				end() {
+					setDraggingClass(node, false);
 				}
 			}
 		});
@@ -102,6 +120,7 @@ export function timelineBlockDrag(node: HTMLElement, params: TimelineBlockDragPa
 	return {
 		update(next: TimelineBlockDragParams) {
 			current = next;
+			interactable?.draggable({ enabled: !next.disabled });
 		},
 		destroy() {
 			cancelled = true;
@@ -123,6 +142,7 @@ export function timelineActualResizeHandle(node: HTMLElement, params: TimelineAc
 		if (cancelled) return;
 
 		interactable = interact(node).draggable({
+			enabled: !current.disabled,
 			listeners: {
 				start() {
 					if (current.disabled) return;
@@ -159,6 +179,7 @@ export function timelineActualResizeHandle(node: HTMLElement, params: TimelineAc
 	return {
 		update(next: TimelineActualResizeParams) {
 			current = next;
+			interactable?.draggable({ enabled: !next.disabled });
 		},
 		destroy() {
 			cancelled = true;
@@ -179,6 +200,7 @@ export function timelineBufferResizeHandle(node: HTMLElement, params: TimelineBu
 		if (cancelled) return;
 
 		interactable = interact(node).draggable({
+			enabled: !current.disabled,
 			listeners: {
 				start() {
 					if (current.disabled) return;
@@ -211,6 +233,7 @@ export function timelineBufferResizeHandle(node: HTMLElement, params: TimelineBu
 	return {
 		update(next: TimelineBufferResizeParams) {
 			current = next;
+			interactable?.draggable({ enabled: !next.disabled });
 		},
 		destroy() {
 			cancelled = true;
