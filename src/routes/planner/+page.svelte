@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { deserialize } from '$app/forms';
-	import { Check, Clock, LayoutGrid, List, Mic, Play, Plus, Sparkles, Users } from '@lucide/svelte';
+	import { ChevronDown, ChevronUp, Plus } from '@lucide/svelte';
 	import { Popover } from 'bits-ui';
 	import {
 		cloneBlocks,
@@ -13,7 +13,7 @@
 		type TimelineSnapshot,
 		type TimelineBlockType
 	} from '$lib/timeline';
-	import EmojiPicker from '$lib/components/emoji-picker.svelte';
+	import BlockIconPicker from '$lib/components/block-icon-picker.svelte';
 	import {
 		timelineActualResizeHandle,
 		timelineBlockDrag,
@@ -26,23 +26,32 @@
 	type AutosaveStatus = 'idle' | 'pending' | 'saving' | 'saved' | 'error';
 	type SaveActionSuccess = { intent?: string; message?: string; timelineId?: string };
 	type SaveActionFailure = { intent?: string; message?: string };
+	type BufferEdge = 'before' | 'after';
+	type BufferMerge = {
+		id: string;
+		lane: string;
+		previous: TimelineBlock;
+		next: TimelineBlock;
+		start: number;
+		end: number;
+		split: number;
+		previousAfterEnd: number;
+		nextBeforeStart: number;
+		totalDuration: number;
+	};
+	type MergedBufferTimeLabel = {
+		id: string;
+		time: string;
+		style: string;
+		align: 'above' | 'below' | 'center';
+	};
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
 
 	const minuteHeight = 2;
 	const laneWidth = 260;
 	const resizeHandleHitPixels = 24;
-	const iconOptions = [
-		{ id: 'play', label: 'Play' },
-		{ id: 'list', label: 'List' },
-		{ id: 'clock', label: 'Clock' },
-		{ id: 'users', label: 'Crew' },
-		{ id: 'mic', label: 'Mic' },
-		{ id: 'spark', label: 'Moment' },
-		{ id: 'layout', label: 'Prep' },
-		{ id: 'check', label: 'Check' }
-	];
-	const lucideIconIds = new Set(iconOptions.map((option) => option.id));
+	const milestoneVisualHeight = 44;
 
 	let lanes = $state<TimelineLane[]>(cloneLanes());
 	let blocks = $state<TimelineBlock[]>(cloneBlocks());
@@ -52,7 +61,6 @@
 	let viewEnd = $state('18:30');
 	let padBefore = $state(30);
 	let padAfter = $state(45);
-	let openIconPicker = $state<string | null>(null);
 	let pageTitle = $state('Event Timeline');
 	let timelineTitle = $state('Launch Meetup Run of Show');
 	let loadedTimelineKey = $state<string | null>(null);
@@ -60,6 +68,7 @@
 	let autosaveStatus = $state<AutosaveStatus>('idle');
 	let autosaveMessage = $state('');
 	let timelineScrollElement: HTMLDivElement | null = $state(null);
+	let separatedBufferMergeIds = $state<string[]>([]);
 	let lastAutosaveKey: string | null = null;
 	let lastAutosaveSignature = '';
 	let autosaveSequence = 0;
@@ -255,13 +264,6 @@
 		return 'border-blue-900/20 bg-blue-50 text-blue-950';
 	}
 
-	function iconColor(type: TimelineBlockType) {
-		if (type === 'scheduled' || type === 'active') return 'bg-emerald-700 text-white';
-		if (type === 'side') return 'bg-violet-600 text-white';
-		if (type === 'milestone') return 'bg-amber-600 text-white';
-		return 'bg-blue-600 text-white';
-	}
-
 	function hasAdvertisedLayer(block: TimelineBlock) {
 		return block.type === 'scheduled' || block.type === 'active' || block.type === 'side';
 	}
@@ -306,6 +308,113 @@
 		return blocks.filter((block) => block.lane === laneId);
 	}
 
+	function actualStartMinutes(block: TimelineBlock) {
+		return timeToMinutes(block.start);
+	}
+
+	function actualEndMinutes(block: TimelineBlock) {
+		return isMilestone(block) ? actualStartMinutes(block) : timeToMinutes(block.end);
+	}
+
+	function laneBufferMerges(laneId: string) {
+		if (viewMode !== 'combined') return [];
+
+		const sortedBlocks = laneBlocks(laneId).sort(
+			(a, b) => actualStartMinutes(a) - actualStartMinutes(b)
+		);
+		const merges: BufferMerge[] = [];
+
+		for (let index = 0; index < sortedBlocks.length - 1; index += 1) {
+			const previous = sortedBlocks[index];
+			const next = sortedBlocks[index + 1];
+			if (previous.bufferAfter <= 0 || next.bufferBefore <= 0) continue;
+
+			const previousAfterStart = actualEndMinutes(previous);
+			const previousAfterEnd = previousAfterStart + previous.bufferAfter;
+			const nextBeforeStart = actualStartMinutes(next) - next.bufferBefore;
+			const nextBeforeEnd = actualStartMinutes(next);
+			if (previousAfterEnd < nextBeforeStart) continue;
+
+			const start = Math.min(previousAfterStart, nextBeforeStart);
+			const end = Math.max(previousAfterEnd, nextBeforeEnd);
+			const split = Math.round((previousAfterEnd + nextBeforeStart) / 2);
+			const id = [
+				previous.id,
+				previousAfterStart,
+				previousAfterEnd,
+				next.id,
+				nextBeforeStart,
+				nextBeforeEnd
+			].join(':');
+
+			if (separatedBufferMergeIds.includes(id)) continue;
+
+			merges.push({
+				id,
+				lane: laneId,
+				previous,
+				next,
+				start,
+				end,
+				split,
+				previousAfterEnd,
+				nextBeforeStart,
+				totalDuration: previous.bufferAfter + next.bufferBefore
+			});
+		}
+
+		return merges;
+	}
+
+	function isBufferMerged(bufferMerges: BufferMerge[], block: TimelineBlock, edge: BufferEdge) {
+		return bufferMerges.some((merge) =>
+			edge === 'before' ? merge.next.id === block.id : merge.previous.id === block.id
+		);
+	}
+
+	function mergedBufferStyle(merge: BufferMerge) {
+		return `top:${(merge.start - viewStartMinutes) * minuteHeight}px; height:${Math.max(12, (merge.end - merge.start) * minuteHeight)}px;`;
+	}
+
+	function mergedBufferHandleStyle(merge: BufferMerge) {
+		return `top:${(merge.split - merge.start) * minuteHeight}px;`;
+	}
+
+	function mergedBufferTimeLabels(merge: BufferMerge): MergedBufferTimeLabel[] {
+		const sharedBoundary = merge.previousAfterEnd === merge.nextBeforeStart;
+		if (sharedBoundary) {
+			return [
+				{
+					id: 'shared',
+					time: minutesToTime(merge.previousAfterEnd),
+					style: `top:${(merge.previousAfterEnd - merge.start) * minuteHeight}px;`,
+					align: 'center'
+				}
+			];
+		}
+
+		return [
+			{
+				id: 'previous-end',
+				time: minutesToTime(merge.previousAfterEnd),
+				style: `top:${(merge.previousAfterEnd - merge.start) * minuteHeight}px;`,
+				align: 'above'
+			},
+			{
+				id: 'next-start',
+				time: minutesToTime(merge.nextBeforeStart),
+				style: `top:${(merge.nextBeforeStart - merge.start) * minuteHeight}px;`,
+				align: 'below'
+			}
+		];
+	}
+
+	function separateBufferMerge(merge: BufferMerge) {
+		if (!separatedBufferMergeIds.includes(merge.id)) {
+			separatedBufferMergeIds = [...separatedBufferMergeIds, merge.id];
+		}
+	}
+
 	function blockTop(block: TimelineBlock) {
 		return (visibleRange(block).start - viewStartMinutes) * minuteHeight;
 	}
@@ -313,13 +422,18 @@
 	function blockHeight(block: TimelineBlock) {
 		const range = visibleRange(block);
 		if (range.advertisedOnly) return Math.max(28, (range.end - range.start) * minuteHeight);
+		if (isMilestone(block)) {
+			return (
+				range.before * minuteHeight + Math.max(range.after * minuteHeight, milestoneVisualHeight)
+			);
+		}
 		return range.before * minuteHeight + actualBlockHeight(block) + range.after * minuteHeight;
 	}
 
 	function actualCardStyle(block: TimelineBlock) {
 		const range = visibleRange(block);
 		const top = range.advertisedOnly ? 0 : range.before * minuteHeight;
-		const height = actualBlockHeight(block);
+		const height = isMilestone(block) ? milestoneVisualHeight : actualBlockHeight(block);
 		return `top:${top}px; height:${height}px; min-height:${height}px;`;
 	}
 
@@ -352,7 +466,7 @@
 	}
 
 	function actualBlockHeight(block: TimelineBlock) {
-		if (isMilestone(block)) return 28;
+		if (isMilestone(block)) return 0;
 		const start =
 			viewMode === 'advertised' && hasAdvertisedLayer(block) ? block.advertisedStart : block.start;
 		const end =
@@ -474,8 +588,8 @@
 			block.advertisedEnd = block.start;
 		}
 		if (type === 'scheduled') {
-			block.advertisedStart = block.advertisedStart || block.start;
-			block.advertisedEnd = block.advertisedEnd || block.end;
+			block.advertisedStart = block.start;
+			block.advertisedEnd = block.end;
 		}
 	}
 
@@ -493,29 +607,9 @@
 		setBlockType(block, order[(order.indexOf(current) + 1) % order.length]);
 	}
 
-	function isEmojiIcon(icon: string) {
-		return !lucideIconIds.has(icon);
-	}
-
 	function setBlockIcon(block: TimelineBlock, icon: string) {
 		if (!canEditActiveWorkspace) return;
 		block.icon = icon;
-		openIconPicker = null;
-	}
-
-	function pickerKey(surface: 'card' | 'panel', blockId: string) {
-		return `${surface}:${blockId}`;
-	}
-
-	function iconComponent(icon: string) {
-		if (icon === 'clock') return Clock;
-		if (icon === 'users') return Users;
-		if (icon === 'mic') return Mic;
-		if (icon === 'spark') return Sparkles;
-		if (icon === 'layout') return LayoutGrid;
-		if (icon === 'check') return Check;
-		if (icon === 'play') return Play;
-		return List;
 	}
 </script>
 
@@ -887,6 +981,7 @@
 					</div>
 
 					{#each lanes as lane (lane.id)}
+						{@const bufferMerges = laneBufferMerges(lane.id)}
 						<div
 							role="region"
 							aria-label={`${lane.label} timeline lane`}
@@ -894,6 +989,54 @@
 							class="relative border-r bg-[repeating-linear-gradient(to_bottom,rgba(255,255,255,.45)_0,rgba(255,255,255,.45)_29px,rgba(246,247,244,.7)_30px,rgba(246,247,244,.7)_59px)]"
 							style={`height:${timelineHeight}px;`}
 						>
+							{#each bufferMerges as merge (merge.id)}
+								<div
+									class="pointer-events-none absolute right-2 left-2 z-[35] rounded-md bg-[repeating-linear-gradient(135deg,rgba(92,101,110,.13)_0_5px,rgba(92,101,110,.04)_5px_10px)] text-[10px] font-black tracking-[0.08em] text-neutral-500 uppercase opacity-80 ring-1 ring-neutral-300/30"
+									style={mergedBufferStyle(merge)}
+								>
+									<span
+										class="absolute top-1/2 left-2 -translate-y-1/2 rounded bg-white/80 px-1.5 py-0.5 text-[10px] leading-none font-black text-neutral-600 shadow-sm shadow-neutral-950/10"
+									>
+										Buffer {merge.totalDuration}m
+									</span>
+									{#each mergedBufferTimeLabels(merge) as timeLabel (timeLabel.id)}
+										<span
+											class={[
+												'absolute right-2 rounded bg-white/85 px-1.5 py-0.5 text-[10px] leading-none font-black tracking-normal text-neutral-600 tabular-nums shadow-sm shadow-neutral-950/10',
+												timeLabel.align === 'above' ? '-translate-y-full' : '',
+												timeLabel.align === 'center' ? '-translate-y-1/2' : '',
+												timeLabel.align === 'below' ? 'translate-y-0' : ''
+											]}
+											style={timeLabel.style}
+										>
+											{timeLabel.time}
+										</span>
+									{/each}
+									<button
+										type="button"
+										aria-label={`Separate buffers between ${merge.previous.title} and ${merge.next.title}`}
+										title="Double-click to separate buffers"
+										data-no-drag
+										class="group/merged-buffer pointer-events-auto absolute right-10 left-10 z-10 flex h-8 -translate-y-1/2 touch-none items-center justify-center rounded-full focus-visible:outline-none enabled:cursor-ns-resize"
+										style={mergedBufferHandleStyle(merge)}
+										ondblclick={(event) => {
+											event.stopPropagation();
+											separateBufferMerge(merge);
+										}}
+										onclick={(event) => event.stopPropagation()}
+									>
+										<ChevronUp
+											class="absolute -top-1 size-3.5 stroke-[3] text-neutral-500 opacity-70 transition group-hover/merged-buffer:-top-2 group-hover/merged-buffer:text-neutral-800"
+										/>
+										<span
+											class="h-1.5 w-full rounded-full bg-neutral-700/75 shadow-[0_0_0_2px_rgba(255,255,255,0.9)] transition group-hover/merged-buffer:h-2 group-hover/merged-buffer:bg-neutral-900"
+										></span>
+										<ChevronDown
+											class="absolute -bottom-1 size-3.5 stroke-[3] text-neutral-500 opacity-70 transition group-hover/merged-buffer:-bottom-2 group-hover/merged-buffer:text-neutral-800"
+										/>
+									</button>
+								</div>
+							{/each}
 							{#each laneBlocks(lane.id) as block (block.id)}
 								{@const range = visibleRange(block)}
 								<div
@@ -1020,7 +1163,7 @@
 										</button>
 									{/if}
 
-									{#if !range.advertisedOnly && range.before > 0}
+									{#if !range.advertisedOnly && range.before > 0 && !isBufferMerged(bufferMerges, block, 'before')}
 										<div
 											class="absolute inset-x-0 flex items-center bg-[repeating-linear-gradient(135deg,rgba(92,101,110,.12)_0_5px,rgba(92,101,110,.035)_5px_10px)] px-2 pr-14 text-[10px] font-black tracking-[0.08em] text-neutral-500 uppercase opacity-70"
 											style={bufferBeforeStyle(block)}
@@ -1055,7 +1198,7 @@
 											type="button"
 											aria-label="Resize actual start"
 											data-no-drag
-											class="group/resize absolute inset-x-3 z-50 flex h-6 touch-none items-center justify-center rounded-full focus-visible:outline-none enabled:cursor-ns-resize disabled:cursor-default"
+											class="group/resize absolute right-24 left-3 z-50 flex h-6 touch-none items-center justify-center rounded-full focus-visible:outline-none enabled:cursor-ns-resize disabled:cursor-default"
 											style={actualHandleStyle(block, 'start')}
 											disabled={!canEditActiveWorkspace}
 											use:timelineActualResizeHandle={{
@@ -1081,7 +1224,7 @@
 											type="button"
 											aria-label="Resize actual end"
 											data-no-drag
-											class="group/resize absolute inset-x-3 z-50 flex h-6 touch-none items-center justify-center rounded-full focus-visible:outline-none enabled:cursor-ns-resize disabled:cursor-default"
+											class="group/resize absolute right-24 left-3 z-50 flex h-6 touch-none items-center justify-center rounded-full focus-visible:outline-none enabled:cursor-ns-resize disabled:cursor-default"
 											style={actualHandleStyle(block, 'end')}
 											disabled={!canEditActiveWorkspace}
 											use:timelineActualResizeHandle={{
@@ -1107,128 +1250,109 @@
 
 									<div
 										class={[
-											'absolute inset-x-0 overflow-hidden rounded-md border p-2 pr-12 shadow-lg shadow-neutral-950/10 transition-[border-color,box-shadow,filter]',
-											blockColors(block.type),
-											selectedId === block.id
-												? 'border-neutral-700 shadow-neutral-950/20 brightness-95'
-												: ''
+											'absolute inset-x-0 transition-[border-color,box-shadow,filter]',
+											isMilestone(block)
+												? 'overflow-visible rounded-none border-0 bg-transparent p-0 pr-0 text-amber-950 shadow-none'
+												: [
+														'overflow-hidden rounded-md border p-2 pr-12 shadow-lg shadow-neutral-950/10',
+														blockColors(block.type),
+														selectedId === block.id
+															? 'border-neutral-700 shadow-neutral-950/20 brightness-95'
+															: ''
+													]
 										]}
 										style={actualCardStyle(block)}
 									>
+										{#if isMilestone(block)}
+											<div
+												class="pointer-events-none absolute inset-x-0 top-0 border-t-2 border-amber-700/75 shadow-[0_1px_0_rgba(255,255,255,0.85)]"
+											></div>
+										{/if}
 										<div
-											class="grid grid-cols-[20px_minmax(0,1fr)] items-start gap-2 text-left text-sm leading-tight font-black"
+											class={[
+												'grid text-left text-sm leading-tight font-black',
+												isMilestone(block)
+													? 'mt-2 grid-cols-[22px_minmax(0,1fr)_auto] items-center gap-1 px-1'
+													: 'grid-cols-[22px_minmax(0,1fr)] items-start gap-1'
+											]}
 										>
 											<div class="relative">
-												<button
-													type="button"
-													aria-label={`Change icon for ${block.title}`}
-													class={[
-														'grid size-5 place-items-center rounded-md',
-														iconColor(block.type)
-													]}
+												<BlockIconPicker
+													ariaLabel={`Change icon for ${block.title}`}
 													disabled={!canEditActiveWorkspace}
-													onclick={(event) => {
-														event.stopPropagation();
-														if (!canEditActiveWorkspace) return;
-														const key = pickerKey('card', block.id);
-														openIconPicker = openIconPicker === key ? null : key;
-													}}
-												>
-													{#if isEmojiIcon(block.icon)}
-														<span class="text-[13px] leading-none">{block.icon}</span>
-													{:else}
-														{@const Icon = iconComponent(block.icon)}
-														<Icon class="size-3" />
-													{/if}
-												</button>
-												{#if canEditActiveWorkspace && openIconPicker === pickerKey('card', block.id)}
-													<div
-														class="absolute top-7 left-0 z-40 grid gap-2 rounded-md border bg-white p-2 shadow-2xl"
-													>
-														<div class="grid grid-cols-8 gap-1">
-															{#each iconOptions as option (option.id)}
-																{@const Choice = iconComponent(option.id)}
-																<button
-																	type="button"
-																	class={[
-																		'grid size-7 place-items-center rounded-md border text-white',
-																		iconColor(block.type),
-																		block.icon === option.id
-																			? 'border-neutral-950'
-																			: 'border-transparent'
-																	]}
-																	title={option.label}
-																	aria-label={`Use ${option.label} icon`}
-																	onclick={() => setBlockIcon(block, option.id)}
-																>
-																	<Choice class="size-4" />
-																</button>
-															{/each}
-														</div>
-														<EmojiPicker onSelect={(emoji) => setBlockIcon(block, emoji)} />
-													</div>
-												{/if}
+													icon={block.icon}
+													onSelect={(icon) => setBlockIcon(block, icon)}
+													title={block.title}
+													type={block.type}
+												/>
 											</div>
 											<input
 												aria-label={`Title for ${block.title}`}
-												class="min-w-0 rounded bg-transparent px-1 py-0 font-black hover:bg-white/50 read-only:hover:bg-transparent focus:bg-white/90 focus:ring-2 focus:ring-blue-600/20 focus:outline-none read-only:focus:bg-transparent read-only:focus:ring-0"
+												class="min-w-0 rounded bg-transparent px-0.5 py-0 font-black hover:bg-white/50 read-only:hover:bg-transparent focus:bg-white/90 focus:ring-2 focus:ring-blue-600/20 focus:outline-none read-only:focus:bg-transparent read-only:focus:ring-0"
 												bind:value={block.title}
 												readonly={!canEditActiveWorkspace}
 												onclick={(event) => event.stopPropagation()}
 											/>
-										</div>
-
-										<div
-											class={[
-												'mt-2 flex flex-wrap gap-1 text-[10px] font-black tracking-[0.05em] text-neutral-500 uppercase'
-											]}
-										>
-											{#if canEditActiveWorkspace && selectedId === block.id}
-												<button
-													type="button"
-													data-no-drag
-													class="rounded-full border bg-white/90 px-2 py-0.5 text-[10px] font-black tracking-[0.05em] text-neutral-700 uppercase hover:border-neutral-900 hover:text-neutral-950 focus-visible:ring-2 focus-visible:ring-neutral-950/20 focus-visible:outline-none"
-													onclick={(event) => {
-														event.stopPropagation();
-														cycleType(block);
-													}}
+											{#if isMilestone(block)}
+												<span
+													class="rounded bg-white/80 px-1.5 py-0.5 text-[10px] leading-none font-black text-amber-800 tabular-nums shadow-sm"
 												>
-													{typeLabel(block.type)}
-												</button>
-											{:else}
-												<span class="rounded-full border bg-white/70 px-2 py-0.5"
-													>{typeLabel(block.type)}</span
-												>
+													{block.start}
+												</span>
 											{/if}
-											<span class="rounded-full border bg-white/70 px-2 py-0.5"
-												>{block.visibility}</span
-											>
-											<span class="rounded-full border bg-white/70 px-2 py-0.5"
-												>{displayedTimeLabel(block)}</span
-											>
 										</div>
-										<p class={['mt-2 line-clamp-2 text-xs leading-5 text-neutral-700']}>
-											{block.notes}
-										</p>
 
-										<div
-											class="pointer-events-none absolute top-2 right-2 bottom-2 grid w-12 grid-rows-[auto_1fr_auto] place-items-center text-[10px] font-black text-neutral-700 tabular-nums"
-										>
-											<span>{displayedStart(block)}</span>
-											<span class="relative h-full w-px bg-neutral-950/25">
-												{#if !isMilestone(block)}
+										{#if !isMilestone(block)}
+											<div
+												class={[
+													'mt-2 flex flex-wrap gap-1 text-[10px] font-black tracking-[0.05em] text-neutral-500 uppercase'
+												]}
+											>
+												{#if canEditActiveWorkspace && selectedId === block.id}
+													<button
+														type="button"
+														data-no-drag
+														class="rounded-full border bg-white/90 px-2 py-0.5 text-[10px] font-black tracking-[0.05em] text-neutral-700 uppercase hover:border-neutral-900 hover:text-neutral-950 focus-visible:ring-2 focus-visible:ring-neutral-950/20 focus-visible:outline-none"
+														onclick={(event) => {
+															event.stopPropagation();
+															cycleType(block);
+														}}
+													>
+														{typeLabel(block.type)}
+													</button>
+												{:else}
+													<span class="rounded-full border bg-white/70 px-2 py-0.5"
+														>{typeLabel(block.type)}</span
+													>
+												{/if}
+												<span class="rounded-full border bg-white/70 px-2 py-0.5"
+													>{block.visibility}</span
+												>
+												<span class="rounded-full border bg-white/70 px-2 py-0.5"
+													>{displayedTimeLabel(block)}</span
+												>
+											</div>
+											<p class={['mt-2 line-clamp-2 text-xs leading-5 text-neutral-700']}>
+												{block.notes}
+											</p>
+
+											<div
+												class="pointer-events-none absolute top-2 right-2 bottom-2 grid w-12 grid-rows-[auto_1fr_auto] place-items-center text-[10px] font-black text-neutral-700 tabular-nums"
+											>
+												<span>{displayedStart(block)}</span>
+												<span class="relative h-full w-px bg-neutral-950/25">
 													<span
 														class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 rounded-md border border-neutral-300 bg-white/95 px-1.5 py-0.5 text-[10px] leading-none font-black whitespace-nowrap text-neutral-600 shadow-sm shadow-neutral-950/10"
 													>
 														{durationLabel(displayedStart(block), displayedEnd(block))}
 													</span>
-												{/if}
-											</span>
-											<span>{isMilestone(block) ? '' : displayedEnd(block)}</span>
-										</div>
+												</span>
+												<span>{displayedEnd(block)}</span>
+											</div>
+										{/if}
 									</div>
 
-									{#if !range.advertisedOnly && range.after > 0}
+									{#if !range.advertisedOnly && range.after > 0 && !isBufferMerged(bufferMerges, block, 'after')}
 										<div
 											class="absolute inset-x-0 flex items-center bg-[repeating-linear-gradient(135deg,rgba(92,101,110,.12)_0_5px,rgba(92,101,110,.035)_5px_10px)] px-2 pr-14 text-[10px] font-black tracking-[0.08em] text-neutral-500 uppercase opacity-70"
 											style={bufferAfterStyle(block)}
@@ -1312,72 +1436,14 @@
 					</label>
 					<div class="grid gap-1 text-xs font-bold text-neutral-500">
 						Icon
-						<div class="relative grid gap-2">
-							<div class="grid grid-cols-[36px_1fr] gap-2">
-								<button
-									type="button"
-									class={[
-										'grid size-9 place-items-center rounded-md border',
-										isEmojiIcon(selectedBlock.icon)
-											? 'border-neutral-950 bg-white text-lg'
-											: 'border-neutral-200 bg-neutral-50 text-neutral-600'
-									]}
-									aria-label="Change block icon"
-									disabled={!canEditActiveWorkspace}
-									onclick={() => {
-										if (!canEditActiveWorkspace) return;
-										const key = pickerKey('panel', selectedBlock.id);
-										openIconPicker = openIconPicker === key ? null : key;
-									}}
-								>
-									{#if isEmojiIcon(selectedBlock.icon)}
-										<span class="leading-none">{selectedBlock.icon}</span>
-									{:else}
-										{@const CurrentIcon = iconComponent(selectedBlock.icon)}
-										<CurrentIcon class="size-4" />
-									{/if}
-								</button>
-								<div class="grid grid-cols-8 gap-1">
-									{#each iconOptions as option (option.id)}
-										{@const Choice = iconComponent(option.id)}
-										<button
-											type="button"
-											class={[
-												'grid size-8 place-items-center rounded-md border',
-												selectedBlock.icon === option.id
-													? 'border-neutral-950 bg-neutral-950 text-white'
-													: 'bg-neutral-50 text-neutral-600'
-											]}
-											title={option.label}
-											aria-label={`Use ${option.label} icon`}
-											disabled={!canEditActiveWorkspace}
-											onclick={() => setBlockIcon(selectedBlock, option.id)}
-										>
-											<Choice class="size-4" />
-										</button>
-									{/each}
-								</div>
-							</div>
-							<button
-								type="button"
-								class="h-8 rounded-md border bg-neutral-50 text-xs font-black text-neutral-700"
-								disabled={!canEditActiveWorkspace}
-								onclick={() => {
-									if (!canEditActiveWorkspace) return;
-									const key = pickerKey('panel', selectedBlock.id);
-									openIconPicker = openIconPicker === key ? null : key;
-								}}
-							>
-								Choose emoji
-							</button>
-							{#if canEditActiveWorkspace && openIconPicker === pickerKey('panel', selectedBlock.id)}
-								<div
-									class="absolute top-full left-0 z-40 mt-2 rounded-md border bg-white p-2 shadow-2xl"
-								>
-									<EmojiPicker onSelect={(emoji) => setBlockIcon(selectedBlock, emoji)} />
-								</div>
-							{/if}
-						</div>
+						<BlockIconPicker
+							ariaLabel="Change block icon"
+							disabled={!canEditActiveWorkspace}
+							icon={selectedBlock.icon}
+							onSelect={(icon) => setBlockIcon(selectedBlock, icon)}
+							title={selectedBlock.title}
+							type={selectedBlock.type}
+						/>
 					</div>
 					<div class="grid grid-cols-2 gap-2">
 						<label class="grid gap-1 text-xs font-bold text-neutral-500">

@@ -166,6 +166,7 @@ export function timelineActualResizeHandle(node: HTMLElement, params: TimelineAc
 	let originStart = 0;
 	let originEnd = 0;
 	let pointerMinuteOffset = 0;
+	let syncAdvertisedWithActual = false;
 
 	function startKey() {
 		return current.target === 'advertised' ? 'advertisedStart' : 'start';
@@ -195,6 +196,11 @@ export function timelineActualResizeHandle(node: HTMLElement, params: TimelineAc
 			current.block[startKey()] = minutesToTime(originStart);
 			current.block[endKey()] = minutesToTime(nextEnd);
 		}
+
+		if (syncAdvertisedWithActual) {
+			current.block.advertisedStart = current.block.start;
+			current.block.advertisedEnd = current.block.end;
+		}
 	}
 
 	async function setup() {
@@ -208,6 +214,10 @@ export function timelineActualResizeHandle(node: HTMLElement, params: TimelineAc
 					if (current.disabled) return;
 					originStart = timeToMinutes(current.block[startKey()]);
 					originEnd = timeToMinutes(current.block[endKey()]);
+					syncAdvertisedWithActual =
+						current.target !== 'advertised' &&
+						current.block.advertisedStart === current.block.start &&
+						current.block.advertisedEnd === current.block.end;
 					current.onSelect(current.block.id);
 					pointerMinuteOffset = event
 						? pointerMinutes(event) - (current.edge === 'start' ? originStart : originEnd)
