@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { ArrowRight, CalendarDays, Copy, Plus, Settings, Workflow } from '@lucide/svelte';
+	import { ArrowRight, Copy, Database, FilePlus, Settings, Workflow } from '@lucide/svelte';
+	import WorkspaceSidebar from '$lib/components/workspace-sidebar.svelte';
 	import type { ActionData, PageData } from './$types';
 
 	let { data, form }: { data: PageData; form?: ActionData } = $props();
@@ -46,13 +47,26 @@
 	function timelineDate(timeline: PageData['timelines'][number]) {
 		const event = timelineEvent(timeline);
 		const value = event?.starts_at ?? timeline.date;
-		if (!value) return 'No date set';
+		if (!value) return 'No date';
 		return new Date(value).toLocaleDateString([], {
 			month: 'short',
 			day: 'numeric',
 			year: 'numeric'
 		});
 	}
+
+	const sidebarEvents = $derived(
+		visibleTimelines.map((timeline) => {
+			const event = timelineEvent(timeline);
+			return {
+				id: timeline.id,
+				title: event?.name ?? timeline.title,
+				href: `/planner?workspace=${timeline.workspace_id}&timeline=${timeline.id}`,
+				startsAt: event?.starts_at ?? timeline.date ?? null,
+				isActive: false
+			};
+		})
+	);
 
 	function updatedLabel(value: string) {
 		return new Date(value).toLocaleDateString([], {
@@ -72,206 +86,205 @@
 	<title>Planners / Timeline Planner</title>
 </svelte:head>
 
-<main class="min-h-svh bg-[#f6f7f4] px-4 py-5 text-neutral-950">
-	<div class="mx-auto grid w-full max-w-7xl gap-5">
-		<header class="flex flex-wrap items-start justify-between gap-4">
-			<div>
-				<div class="mb-3 flex items-center gap-3">
-					<div class="grid size-10 place-items-center rounded-lg bg-neutral-950 text-white">
-						<Workflow class="size-5" />
-					</div>
-					<div>
-						<p class="text-xs font-black tracking-[0.12em] text-neutral-500 uppercase">Planners</p>
-						<p class="text-sm font-bold text-neutral-500">{data.userEmail}</p>
-					</div>
-				</div>
-				<h1 class="text-3xl font-black tracking-normal">All timelines</h1>
-				<p class="mt-2 text-sm font-bold text-neutral-500">
-					{totalTimelineCount} planners across {data.workspaces.length} workspaces
-				</p>
-			</div>
-			<div class="flex flex-wrap gap-2">
-				{#if activeWorkspace}
-					<a
-						class="inline-flex h-10 items-center gap-2 rounded-lg border bg-white px-3 text-sm font-black shadow-sm"
-						href={`/settings?workspace=${activeWorkspace.id}`}
-					>
-						<Settings class="size-4" />
-						Settings
-					</a>
-					<a
-						class="inline-flex h-10 items-center gap-2 rounded-lg bg-neutral-950 px-4 text-sm font-black text-white shadow-sm"
-						href={`/planner?workspace=${activeWorkspace.id}`}
-					>
-						Open planner
-						<ArrowRight class="size-4" />
-					</a>
-				{/if}
-			</div>
-		</header>
+<main class="app-page">
+	<div class="app-shell-grid">
+		<WorkspaceSidebar
+			active="timelines"
+			activeWorkspaceId={data.activeWorkspaceId}
+			events={sidebarEvents}
+			mode={data.mode}
+			userEmail={data.userEmail}
+			workspaces={data.workspaces}
+			workspaceName={activeWorkspace?.name ?? 'Timeline Planner'}
+		/>
 
-		{#if data.mode === 'local'}
-			<section class="rounded-xl border bg-white p-5 shadow-xl shadow-neutral-950/5">
-				<h2 class="text-lg font-black">Local sample mode</h2>
-				<p class="mt-2 max-w-xl text-sm leading-6 font-bold text-neutral-500">
-					Connect Supabase and sign in to browse saved planners. The local sample planner is still
-					available.
-				</p>
-				<a
-					class="mt-4 inline-flex h-10 items-center rounded-lg bg-neutral-950 px-4 text-sm font-black text-white"
-					href="/planner"
+		<section class="min-w-0">
+			<header class="app-topbar">
+				<div
+					class="flex min-w-0 items-center gap-2 text-sm font-medium text-[var(--app-text-muted)]"
 				>
-					Open sample planner
-				</a>
-			</section>
-		{:else if activeWorkspace}
-			<section class="flex flex-wrap gap-2">
-				{#each data.workspaces as workspace (workspace.id)}
-					<a
-						class={[
-							'inline-flex min-h-10 items-center gap-2 rounded-lg border px-3 py-2 text-sm font-black shadow-sm',
-							workspace.id === activeWorkspace.id
-								? 'border-neutral-950 bg-neutral-950 text-white'
-								: 'bg-white text-neutral-600 hover:text-neutral-950'
-						]}
-						href={`/timelines?workspace=${workspace.id}`}
-					>
-						<span>{workspace.name}</span>
-						<span
-							class={[
-								'rounded-full px-2 py-0.5 text-[11px]',
-								workspace.id === activeWorkspace.id ? 'bg-white/15' : 'bg-neutral-100'
-							]}
+					<Database class="size-4" />
+					<span>Planners</span>
+					{#if activeWorkspace}
+						<span class="text-[var(--app-text-subtle)]">/</span>
+						<span class="truncate text-[var(--app-text-secondary)]">{activeWorkspace.name}</span>
+					{/if}
+				</div>
+				{#if activeWorkspace}
+					<div class="flex items-center gap-2">
+						<a class="app-button" href={`/settings?workspace=${activeWorkspace.id}`}>
+							<Settings class="size-4" />
+							Settings
+						</a>
+						<a
+							class="app-button app-button-primary"
+							href={`/planner?workspace=${activeWorkspace.id}`}
 						>
-							{workspaceTimelineCount(workspace.id)}
-						</span>
-					</a>
-				{/each}
-			</section>
+							Open planner
+							<ArrowRight class="size-4" />
+						</a>
+					</div>
+				{/if}
+			</header>
 
-			<section class="grid gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
-				<aside class="grid content-start gap-4">
-					<div class="rounded-xl border bg-white p-5 shadow-xl shadow-neutral-950/5">
-						<p class="text-xs font-black tracking-[0.12em] text-neutral-500 uppercase">Workspace</p>
-						<h2 class="mt-2 text-xl font-black">{activeWorkspace.name}</h2>
-						<p class="mt-1 text-sm font-bold text-neutral-500">
-							{visibleTimelines.length} planners / {roleLabel(activeWorkspaceRole)}
+			<div class="mx-auto grid w-full max-w-6xl gap-6 px-6 py-6">
+				<header class="flex flex-wrap items-end justify-between gap-4">
+					<div class="min-w-0">
+						<div
+							class="mb-4 grid size-12 place-items-center rounded-lg border border-[var(--app-line)] bg-[var(--app-panel)] shadow-[var(--app-shadow)]"
+						>
+							<Workflow class="size-6 text-[var(--app-accent)]" />
+						</div>
+						<p class="app-section-title">Runboards database</p>
+						<h1 class="mt-2 text-4xl font-semibold tracking-[-0.025em] text-[var(--app-text)]">
+							All planners
+						</h1>
+						<p class="mt-2 text-sm text-[var(--app-text-muted)]">
+							{totalTimelineCount} planners across {data.workspaces.length} workspaces
 						</p>
 					</div>
 
-					{#if canEditActiveWorkspace}
-						<div class="rounded-xl border bg-white p-5 shadow-xl shadow-neutral-950/5">
-							<div class="mb-4 flex items-center gap-2">
-								<Plus class="size-5 text-neutral-500" />
-								<h2 class="text-lg font-black">New planner</h2>
-							</div>
-							<form class="grid gap-3" method="POST" action="?/createBlankTimeline">
-								<input type="hidden" name="workspaceId" value={activeWorkspace.id} />
-								<label class="grid gap-2 text-sm font-black text-neutral-500">
-									Title
-									<input
-										class="h-11 rounded-lg border bg-white px-3 text-sm font-bold text-neutral-950 outline-none focus:border-neutral-950"
-										name="title"
-										placeholder="Run of show"
-									/>
-								</label>
-								<button
-									class="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-neutral-950 px-4 text-sm font-black text-white"
-									type="submit"
-								>
-									Create planner
-									<ArrowRight class="size-4" />
-								</button>
-							</form>
-							{#if formMessage('timeline')}
-								<p
-									class="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-bold text-red-700"
-								>
-									{formMessage('timeline')}
-								</p>
-							{/if}
-						</div>
+					{#if activeWorkspace && canEditActiveWorkspace}
+						<form
+							class="flex flex-wrap items-end gap-2"
+							method="POST"
+							action="?/createBlankTimeline"
+						>
+							<input type="hidden" name="workspaceId" value={activeWorkspace.id} />
+							<label class="app-label min-w-[220px]">
+								New planner
+								<input class="app-input" name="title" placeholder="Run of show" />
+							</label>
+							<button class="app-button app-button-primary h-8" type="submit">
+								<FilePlus class="size-4" />
+								New
+							</button>
+						</form>
 					{/if}
-				</aside>
+				</header>
 
-				<section class="rounded-xl border bg-white shadow-xl shadow-neutral-950/5">
-					<div class="flex flex-wrap items-center justify-between gap-3 border-b p-5">
-						<div>
-							<h2 class="text-lg font-black">{activeWorkspace.name} planners</h2>
-							<p class="mt-1 text-sm font-bold text-neutral-500">
-								Open a saved timeline or duplicate one as a starting point.
-							</p>
-						</div>
+				{#if formMessage('timeline')}
+					<p
+						class="rounded-md border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700"
+					>
+						{formMessage('timeline')}
+					</p>
+				{/if}
+
+				{#if data.mode === 'local'}
+					<section class="app-panel p-4">
+						<h2 class="text-sm font-semibold">Local sample mode</h2>
+						<p class="mt-1 max-w-xl text-sm leading-6 text-[var(--app-text-muted)]">
+							Connect Supabase and sign in to browse saved planners. The local sample planner is
+							still available.
+						</p>
+						<a class="app-button app-button-primary mt-4" href="/planner">Open sample planner</a>
+					</section>
+				{:else if activeWorkspace}
+					<div class="flex flex-wrap gap-2">
+						{#each data.workspaces as workspace (workspace.id)}
+							<a
+								class={[
+									'app-button',
+									workspace.id === activeWorkspace.id ? 'app-button-primary' : ''
+								]}
+								href={`/timelines?workspace=${workspace.id}`}
+							>
+								<span>{workspace.name}</span>
+								<span class="rounded bg-white/20 px-1.5 text-xs">
+									{workspaceTimelineCount(workspace.id)}
+								</span>
+							</a>
+						{/each}
 					</div>
 
-					<div class="divide-y">
+					<section class="app-panel overflow-hidden">
+						<div
+							class="grid min-h-10 grid-cols-[minmax(220px,1fr)_120px_120px_150px_120px] items-center gap-3 border-b border-[var(--app-line)] bg-[var(--app-soft)] px-3 text-xs font-semibold text-[var(--app-text-muted)]"
+						>
+							<span>Name</span>
+							<span>Date</span>
+							<span>Window</span>
+							<span>Updated</span>
+							<span class="text-right">Actions</span>
+						</div>
+
 						{#each visibleTimelines as timeline (timeline.id)}
 							{@const event = timelineEvent(timeline)}
-							<article class="grid gap-4 p-5 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-center">
-								<div class="min-w-0">
-									<div class="flex flex-wrap items-center gap-2">
-										<h3 class="truncate text-lg font-black">{timeline.title}</h3>
+							<article
+								class="app-database-row grid-cols-[minmax(220px,1fr)_120px_120px_150px_120px] gap-3"
+							>
+								<a
+									class="min-w-0"
+									href={`/planner?workspace=${timeline.workspace_id}&timeline=${timeline.id}`}
+								>
+									<div class="flex min-w-0 items-center gap-2">
+										<p class="truncate text-sm font-semibold text-[var(--app-text)]">
+											{timeline.title}
+										</p>
 										{#if event}
-											<span
-												class="rounded-full border bg-violet-50 px-2 py-0.5 text-[11px] font-black text-violet-700 uppercase"
+											<span class="app-pill border-violet-200 bg-violet-50 text-violet-700"
+												>Luma</span
 											>
-												Luma
-											</span>
 										{/if}
 									</div>
-									<div
-										class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm font-bold text-neutral-500"
-									>
-										<span class="inline-flex items-center gap-1.5">
-											<CalendarDays class="size-4" />
-											{timelineDate(timeline)}
-										</span>
-										<span>{timeline.view_start.slice(0, 5)}-{timeline.view_end.slice(0, 5)}</span>
-										<span
-											>{timeline.pad_before_minutes}m before / {timeline.pad_after_minutes}m after</span
-										>
-										<span>Updated {updatedLabel(timeline.updated_at)}</span>
-									</div>
 									{#if event}
-										<p class="mt-2 truncate text-sm font-bold text-neutral-500">
+										<p class="mt-1 truncate text-xs text-[var(--app-text-muted)]">
 											{event.name}{event.location ? ` / ${event.location}` : ''}
 										</p>
 									{/if}
-								</div>
-								<div class="flex flex-wrap gap-2">
+								</a>
+								<span class="text-sm text-[var(--app-text-muted)]">{timelineDate(timeline)}</span>
+								<span class="text-sm text-[var(--app-text-muted)]">
+									{timeline.view_start.slice(0, 5)}-{timeline.view_end.slice(0, 5)}
+								</span>
+								<span class="text-sm text-[var(--app-text-muted)]"
+									>{updatedLabel(timeline.updated_at)}</span
+								>
+								<div class="flex justify-end gap-1">
 									<a
-										class="inline-flex h-10 items-center gap-2 rounded-lg bg-neutral-950 px-4 text-sm font-black text-white"
+										class="app-button"
 										href={`/planner?workspace=${timeline.workspace_id}&timeline=${timeline.id}`}
 									>
 										Open
-										<ArrowRight class="size-4" />
 									</a>
 									{#if canEditActiveWorkspace}
 										<form method="POST" action="?/duplicateTimeline">
 											<input type="hidden" name="workspaceId" value={timeline.workspace_id} />
 											<input type="hidden" name="timelineId" value={timeline.id} />
-											<button
-												class="inline-flex h-10 items-center gap-2 rounded-lg border bg-white px-3 text-sm font-black"
-												type="submit"
-											>
+											<button class="app-button" type="submit" title="Duplicate planner">
 												<Copy class="size-4" />
-												Duplicate
 											</button>
 										</form>
 									{/if}
 								</div>
 							</article>
 						{:else}
-							<div class="p-5">
-								<h3 class="font-black">No planners yet</h3>
-								<p class="mt-1 text-sm font-bold text-neutral-500">
+							<div class="px-4 py-12">
+								<h3 class="text-sm font-semibold">No planners yet</h3>
+								<p class="mt-1 text-sm text-[var(--app-text-muted)]">
 									Create a planner for this workspace to start building a run of show.
 								</p>
 							</div>
 						{/each}
+					</section>
+
+					<div class="grid gap-3 text-sm text-[var(--app-text-muted)] md:grid-cols-3">
+						<div class="app-panel p-3">
+							<p class="font-semibold text-[var(--app-text)]">{activeWorkspace.name}</p>
+							<p class="mt-1">{visibleTimelines.length} planners in this workspace</p>
+						</div>
+						<div class="app-panel p-3">
+							<p class="font-semibold text-[var(--app-text)]">Role</p>
+							<p class="mt-1 capitalize">{roleLabel(activeWorkspaceRole)}</p>
+						</div>
+						<div class="app-panel p-3">
+							<p class="font-semibold text-[var(--app-text)]">Buffers</p>
+							<p class="mt-1">Planner windows preserve before and after padding.</p>
+						</div>
 					</div>
-				</section>
-			</section>
-		{/if}
+				{/if}
+			</div>
+		</section>
 	</div>
 </main>

@@ -32,6 +32,10 @@ type TimelineRecord = {
 	id: string;
 	title: string;
 	luma_event_id: string | null;
+	date: string | null;
+	timezone: string;
+	starts_at: string | null;
+	ends_at: string | null;
 	view_start: string;
 	view_end: string;
 	pad_before_minutes: number;
@@ -63,9 +67,28 @@ type BlockRow = {
 };
 
 type WorkspaceRole = 'owner' | 'admin' | 'member' | 'viewer';
+type WorkspaceMemberRecord = {
+	id: string;
+	email: string | null;
+	fullName: string | null;
+	avatarUrl: string | null;
+	role: WorkspaceRole;
+};
+type WorkspaceMemberRow = {
+	user_id: string;
+	role: WorkspaceRole;
+};
+type ProfileRow = {
+	id: string;
+	email: string | null;
+	full_name: string | null;
+	avatar_url: string | null;
+};
 type ActionIntent = 'timeline' | 'save' | 'luma';
 
 const timePattern = /^([01]\d|2[0-3]):[0-5]\d$/;
+const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+const dateTimePattern = /^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d$/;
 const idPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 function actionFail(status: number, intent: ActionIntent, message: string) {
 	return fail(status, { intent, message });
@@ -74,6 +97,24 @@ function actionFail(status: number, intent: ActionIntent, message: string) {
 function timeInput(value: string | null | undefined, fallback = '09:00') {
 	const next = value?.slice(0, 5) ?? fallback;
 	return timePattern.test(next) ? next : fallback;
+}
+
+function dateInput(value: string | null | undefined) {
+	const next = value?.slice(0, 10) ?? '';
+	return datePattern.test(next) ? next : null;
+}
+
+function dateTimeInput(value: string | null | undefined) {
+	const next = String(value ?? '').slice(0, 16);
+	return dateTimePattern.test(next) ? next : null;
+}
+
+function combineDateTime(date: string | null | undefined, time: string | null | undefined) {
+	return `${dateInput(date) ?? new Date().toISOString().slice(0, 10)}T${timeInput(time)}`;
+}
+
+function timezoneInput(value: string | null | undefined) {
+	return String(value ?? '').trim() || 'Europe/London';
 }
 
 function nonNegativeNumber(value: unknown, fallback = 0) {
@@ -148,6 +189,14 @@ function normalizeSnapshot(raw: unknown): TimelineSnapshot | null {
 	return {
 		id: typeof snapshot.id === 'string' && idPattern.test(snapshot.id) ? snapshot.id : null,
 		title: String(snapshot.title ?? '').trim() || 'Run of Show',
+		date: dateInput(snapshot.date),
+		timezone: timezoneInput(snapshot.timezone),
+		startsAt:
+			dateTimeInput(snapshot.startsAt) ??
+			combineDateTime(dateInput(snapshot.date), timeInput(snapshot.viewStart, '08:00')),
+		endsAt:
+			dateTimeInput(snapshot.endsAt) ??
+			combineDateTime(dateInput(snapshot.date), timeInput(snapshot.viewEnd, '18:30')),
 		viewStart: timeInput(snapshot.viewStart, '08:00'),
 		viewEnd: timeInput(snapshot.viewEnd, '18:30'),
 		padBefore: nonNegativeNumber(snapshot.padBefore, 30),
@@ -173,6 +222,40 @@ async function workspaceRole(
 	return data.role as WorkspaceRole;
 }
 
+async function workspaceMemberRecords(
+	supabase: NonNullable<App.Locals['supabase']>,
+	workspaceId: string
+) {
+	const { data: memberships } = await supabase
+		.from('workspace_members')
+		.select('user_id,role')
+		.eq('workspace_id', workspaceId)
+		.order('created_at', { ascending: true });
+
+	const memberRows = (memberships ?? []) as WorkspaceMemberRow[];
+	const userIds = memberRows.map((member) => member.user_id);
+	if (userIds.length === 0) return [] satisfies WorkspaceMemberRecord[];
+
+	const { data: profiles } = await supabase
+		.from('profiles')
+		.select('id,email,full_name,avatar_url')
+		.in('id', userIds);
+	const profilesById = new Map(
+		((profiles ?? []) as ProfileRow[]).map((profile) => [profile.id, profile])
+	);
+
+	return memberRows.map((member) => {
+		const profile = profilesById.get(member.user_id);
+		return {
+			id: member.user_id,
+			email: profile?.email ?? null,
+			fullName: profile?.full_name ?? null,
+			avatarUrl: profile?.avatar_url ?? null,
+			role: member.role
+		} satisfies WorkspaceMemberRecord;
+	});
+}
+
 function canEditWorkspace(role: WorkspaceRole | null) {
 	return role === 'owner' || role === 'admin' || role === 'member';
 }
@@ -189,6 +272,7 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 			mode: 'local' as const,
 			userEmail: null as string | null,
 			workspaces: [] as WorkspaceRecord[],
+			workspaceMembers: [] as WorkspaceMemberRecord[],
 			lumaEvents: [] as LumaEventRecord[],
 			timelines: [] as TimelineRecord[],
 			activeWorkspaceRole: null as WorkspaceRole | null,
@@ -215,7 +299,7 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 		? await workspaceRole(locals.supabase, workspace.id, user.id)
 		: null;
 
-	const [{ data: lumaEvents }, { data: timelines }] = workspace
+	const [lumaEventsResult, timelinesResult, workspaceMembers] = workspace
 		? await Promise.all([
 				workspace.luma_calendar_api_id
 					? locals.supabase
@@ -227,13 +311,16 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 					: Promise.resolve({ data: [] }),
 				locals.supabase
 					.from('timelines')
-					.select('id,title,luma_event_id,view_start,view_end,pad_before_minutes,pad_after_minutes')
+					.select(
+						'id,title,luma_event_id,date,timezone,starts_at,ends_at,view_start,view_end,pad_before_minutes,pad_after_minutes'
+					)
 					.eq('workspace_id', workspace.id)
-					.order('created_at', { ascending: false })
+					.order('created_at', { ascending: false }),
+				workspaceMemberRecords(locals.supabase, workspace.id)
 			])
-		: [{ data: [] }, { data: [] }];
+		: [{ data: [] }, { data: [] }, []];
 
-	const timelineRecords = (timelines ?? []) as TimelineRecord[];
+	const timelineRecords = (timelinesResult.data ?? []) as TimelineRecord[];
 	const requestedTimeline = url.searchParams.get('timeline');
 	const activeTimelineRecord =
 		timelineRecords.find((timeline) => timeline.id === requestedTimeline) ?? timelineRecords[0];
@@ -258,6 +345,14 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 		activeTimeline = {
 			id: activeTimelineRecord.id,
 			title: activeTimelineRecord.title,
+			date: activeTimelineRecord.date,
+			timezone: activeTimelineRecord.timezone,
+			startsAt:
+				dateTimeInput(activeTimelineRecord.starts_at) ??
+				combineDateTime(activeTimelineRecord.date, timeInput(activeTimelineRecord.view_start, '08:00')),
+			endsAt:
+				dateTimeInput(activeTimelineRecord.ends_at) ??
+				combineDateTime(activeTimelineRecord.date, timeInput(activeTimelineRecord.view_end, '18:30')),
 			viewStart: timeInput(activeTimelineRecord.view_start, '08:00'),
 			viewEnd: timeInput(activeTimelineRecord.view_end, '18:30'),
 			padBefore: activeTimelineRecord.pad_before_minutes,
@@ -286,7 +381,8 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 		mode: 'supabase' as const,
 		userEmail: user.email ?? null,
 		workspaces: workspaceRecords,
-		lumaEvents: (lumaEvents ?? []) as LumaEventRecord[],
+		workspaceMembers,
+		lumaEvents: (lumaEventsResult.data ?? []) as LumaEventRecord[],
 		timelines: timelineRecords,
 		activeWorkspaceRole,
 		activeWorkspaceId: workspace?.id ?? null,
@@ -416,6 +512,17 @@ export const actions: Actions = {
 			return actionFail(400, 'luma', timelineError?.message ?? 'Could not create timeline.');
 		}
 
+		if (event.starts_at || event.ends_at) {
+			await locals.supabase
+				.from('timelines')
+				.update({
+					starts_at: dateTimeInput(event.starts_at),
+					ends_at: dateTimeInput(event.ends_at)
+				})
+				.eq('id', timelineId)
+				.eq('workspace_id', workspaceId);
+		}
+
 		redirect(303, `/planner?workspace=${workspaceId}&timeline=${timelineId}`);
 	},
 
@@ -467,6 +574,21 @@ export const actions: Actions = {
 
 		if (saveError || !timelineId) {
 			return actionFail(400, 'save', saveError?.message ?? 'Could not save the timeline.');
+		}
+
+		const { error: metaError } = await locals.supabase
+			.from('timelines')
+			.update({
+				date: snapshot.date,
+				timezone: snapshot.timezone,
+				starts_at: snapshot.startsAt,
+				ends_at: snapshot.endsAt
+			})
+			.eq('id', timelineId)
+			.eq('workspace_id', workspaceId);
+
+		if (metaError) {
+			return actionFail(400, 'save', metaError.message ?? 'Could not save the timeline date.');
 		}
 
 		if (isAutosave) {

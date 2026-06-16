@@ -26,6 +26,10 @@ export type TimelineBlock = {
 export type TimelineSnapshot = {
 	id: string | null;
 	title: string;
+	date: string | null;
+	timezone: string;
+	startsAt: string | null;
+	endsAt: string | null;
 	viewStart: string;
 	viewEnd: string;
 	padBefore: number;
